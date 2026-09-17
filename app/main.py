@@ -149,8 +149,11 @@ def search_pins(q: str = Query(..., min_length=1, max_length=100, description="s
         res["results"] = [r for r in res["results"] if r["type"] == "gif"]
         res["hits"] = len(res["results"])
     if resolve_mp4:
-        res["results"] = [searcher.resolve_mp4s(r) if r["type"] == "video" else r
-                          for r in res["results"]]
+        vids = [i for i, r in enumerate(res["results"]) if r["type"] == "video"]
+        if vids:
+            resolved = searcher.resolve_mp4s_many([res["results"][i] for i in vids])
+            for i, r in zip(vids, resolved):
+                res["results"][i] = r
     return _strip_internal(res)
 
 
@@ -165,7 +168,7 @@ def search_videos(q: str = Query(..., min_length=1, max_length=100),
     res["results"] = [r for r in res["results"] if r["type"] == "video"]
     res["hits"] = len(res["results"])
     if resolve_mp4:
-        res["results"] = [searcher.resolve_mp4s(r) for r in res["results"]]
+        res["results"] = searcher.resolve_mp4s_many(res["results"])
     return _strip_internal(res)
 
 

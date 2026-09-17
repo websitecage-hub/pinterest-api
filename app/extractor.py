@@ -257,10 +257,23 @@ def manifest_from_pin(pin: dict, pin_id: str) -> dict:
 def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
     """Main entry: pin URL or id -> download manifest. Retries on transient
     SSR variance (Pinterest occasionally serves a page without the relay
-    payload — a second fetch usually gets the full one)."""
+    payload — a second fetch usually gets the full one). Manifests are
+    cached 1h (pinimg URLs are stable), making repeated video search
+    resolution near-instant."""
     pin_id = pin_id_from(url_or_id) or (url_or_id if url_or_id.isdigit() else None)
     if not pin_id:
         raise ValueError(f"cannot parse pin id from {url_or_id!r}")
+
+    from cache import TTLCache, deep_copy_if
+    global _pin_cache
+    try:
+        _pin_cache
+    except NameError:
+        _pin_cache = TTLCache(max_entries=2048)
+    cached = _pin_cache.get(("pin", pin_id))
+    if cached is not None:
+        return deep_copy_if(cached)
+
     last_err = None
     for attempt in range(retries + 1):
         try:
@@ -268,7 +281,9 @@ def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
             for payload in extract_relay_payloads(html):
                 pin = _find_pin_obj(payload)
                 if pin is not None:
-                    return manifest_from_pin(pin, pin_id)
+                    manifest = manifest_from_pin(pin, pin_id)
+                    _pin_cache.set(("pin", pin_id), deep_copy_if(manifest), 3600)
+                    return manifest
             last_err = RuntimeError(
                 f"relay extraction failed for pin {pin_id} (page structure changed?)")
         except Exception as e:
