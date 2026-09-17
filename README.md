@@ -23,7 +23,7 @@ that Pinterest embeds in every pin page.
 
 ## Run
 
-    git clone https://github.com/<you>/pinterest-api.git
+    git clone https://github.com/websitecage-hub/pinterest-api.git
     cd pinterest-api
     bash setup.sh          # creates .venv, installs fastapi/uvicorn/requests
     .venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
