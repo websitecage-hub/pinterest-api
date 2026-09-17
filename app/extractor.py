@@ -254,17 +254,26 @@ def manifest_from_pin(pin: dict, pin_id: str) -> dict:
     }
 
 
-def get_pin(url_or_id: str, timeout: int = 20) -> dict:
-    """Main entry: pin URL or id -> download manifest."""
+def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
+    """Main entry: pin URL or id -> download manifest. Retries on transient
+    SSR variance (Pinterest occasionally serves a page without the relay
+    payload — a second fetch usually gets the full one)."""
     pin_id = pin_id_from(url_or_id) or (url_or_id if url_or_id.isdigit() else None)
     if not pin_id:
         raise ValueError(f"cannot parse pin id from {url_or_id!r}")
-    html = _fetch(f"https://www.pinterest.com/pin/{pin_id}/", timeout)
-    for payload in extract_relay_payloads(html):
-        pin = _find_pin_obj(payload)
-        if pin is not None:
-            return manifest_from_pin(pin, pin_id)
-    raise RuntimeError(f"relay extraction failed for pin {pin_id} (page structure changed?)")
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            html = _fetch(f"https://www.pinterest.com/pin/{pin_id}/", timeout)
+            for payload in extract_relay_payloads(html):
+                pin = _find_pin_obj(payload)
+                if pin is not None:
+                    return manifest_from_pin(pin, pin_id)
+            last_err = RuntimeError(
+                f"relay extraction failed for pin {pin_id} (page structure changed?)")
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 
 if __name__ == "__main__":
