@@ -36,6 +36,7 @@ from fastapi.responses import StreamingResponse
 import downloader
 from extractor import get_pin, pin_id_from, PinNotFoundError
 import searcher
+from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
@@ -49,6 +50,8 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+register_gallery(app)
 
 DOWNLOADS_DIR = os.environ.get("PINTEREST_DOWNLOADS", "/tmp/pinterest-api-downloads")
 
