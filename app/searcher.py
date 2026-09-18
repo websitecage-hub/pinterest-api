@@ -23,6 +23,10 @@ _session = None
 _session_lock = threading.Lock()
 
 
+class SearchError(Exception):
+    """Raised when Pinterest search fails after retries."""
+
+
 def _get_session() -> requests.Session:
     """Lazily create (and reuse) a session with Pinterest cookies. Thread-safe."""
     global _session
@@ -103,16 +107,33 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
     url = ("https://www.pinterest.com/resource/BaseSearchResource/get/"
            "?source_url=" + urllib.parse.quote(f"/search/{scope}/?q={query}", safe="")
            + "&data=" + urllib.parse.quote(data, safe=""))
-    r = s.get(url, headers={
-        "X-Requested-With": "XMLHttpRequest",
-        "X-Pinterest-PWS-Handler": "www/search/[scope].js",
-        "X-CSRFToken": s.cookies.get("csrftoken", ""),
-        "Accept": "application/json, text/javascript, */*, q=0.01",
-        "Referer": f"https://www.pinterest.com/search/{scope}/?q={query}",
-    }, timeout=timeout)
+    try:
+        r = s.get(url, headers={
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Pinterest-PWS-Handler": "www/search/[scope].js",
+            "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
+            "Accept": "application/json, text/javascript, */*, q=0.01",
+            "Referer": f"https://www.pinterest.com/search/{scope}/?q={query}",
+        }, timeout=timeout)
+    except requests.Timeout as e:
+        if not _retried:
+            return search(query, scope, page_size, bookmark, filters,
+                          timeout + 10, _retried=True)
+        raise SearchError(f"Pinterest search timed out: {e}") from e
+    except requests.ConnectionError as e:
+        if not _retried:
+            return search(query, scope, page_size, bookmark, filters,
+                          timeout, _retried=True)
+        raise SearchError(f"Pinterest connection failed: {e}") from e
     if r.status_code in (401, 403) and not _retried:
         # session went stale mid-flight — one retry with fresh cookies
         _reset_session()
+        return search(query, scope, page_size, bookmark, filters, timeout,
+                      _retried=True)
+    if r.status_code in (429, 502, 503) and not _retried:
+        # Pinterest throttling / hiccup — one backoff retry
+        import time
+        time.sleep(2)
         return search(query, scope, page_size, bookmark, filters, timeout,
                       _retried=True)
     r.raise_for_status()

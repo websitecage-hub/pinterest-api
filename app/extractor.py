@@ -34,6 +34,10 @@ META_RE = re.compile(
 META_CONTENT_RE = re.compile(r'content="([^"]*)"')
 
 
+class PinNotFoundError(Exception):
+    """Raised when the pin page loads but contains no pin data (deleted/nonexistent pin)."""
+
+
 def pin_id_from(url_or_id: str) -> str | None:
     m = PIN_URL_RE.search(url_or_id.strip())
     return m.group(1) if m else None
@@ -284,8 +288,8 @@ def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
                     manifest = manifest_from_pin(pin, pin_id)
                     _pin_cache.set(("pin", pin_id), deep_copy_if(manifest), 3600)
                     return manifest
-            last_err = RuntimeError(
-                f"relay extraction failed for pin {pin_id} (page structure changed?)")
+            last_err = PinNotFoundError(
+                f"pin {pin_id} not found (page loaded but has no pin data)")
         except Exception as e:
             last_err = e
     raise last_err

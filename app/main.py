@@ -34,7 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 import downloader
-from extractor import get_pin, pin_id_from
+from extractor import get_pin, pin_id_from, PinNotFoundError
 import searcher
 
 app = FastAPI(
@@ -60,6 +60,8 @@ def _manifest_or_404(target: str) -> dict:
         return get_pin(target)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PinNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Pinterest fetch failed: {e}")
 
@@ -175,12 +177,33 @@ def search_videos(q: str = Query(..., min_length=1, max_length=100),
 @app.get("/search/gifs")
 def search_gifs(q: str = Query(..., min_length=1, max_length=100),
                 page_size: int = Query(25, ge=1, le=50),
-                page_bookmark: str | None = None):
-    res = _search_or_502(searcher.search, q, "pins", page_size, page_bookmark)
+                page_bookmark: str | None = None,
+                pages: int = Query(1, ge=1, le=3, description="probe up to N pages to collect enough gifs")):
     # Pinterest has no server-side gif filter — probe /originals/{sig}.gif
-    # for each result and keep only real animated gifs.
-    res["results"] = searcher.detect_gifs(res["results"])
-    res["hits"] = len(res["results"])
+    # for each result and keep only real animated gifs. Generic queries
+    # (e.g. "funny cat") rarely surface gif pins in ranking, so search a
+    # gif-oriented variant (append " gif" when missing); optionally probe
+    # deeper pages (deduped) until we have hits.
+    gif_q = q if "gif" in q.lower().split() else f"{q} gif"
+    res = _search_or_502(searcher.search, gif_q, "pins", page_size, page_bookmark)
+    gifs = [p for p in searcher.detect_gifs(res["results"]) if p is not None]
+    seen = {g["id"] for g in gifs}
+    bm = res.get("next_bookmark")
+    page = 1
+    while not gifs and bm and page < pages:
+        nxt = _search_or_502(searcher.search, gif_q, "pins", page_size, bm)
+        for p in searcher.detect_gifs(nxt["results"]):
+            if p is not None and p["id"] not in seen:
+                seen.add(p["id"])
+                gifs.append(p)
+        bm = nxt.get("next_bookmark")
+        page += 1
+    res["query"] = q
+    res["effective_query"] = gif_q
+    res["results"] = gifs
+    res["hits"] = len(gifs)
+    res["next_bookmark"] = bm
+    res["has_more"] = bool(bm)
     return _strip_internal(res)
 
 
