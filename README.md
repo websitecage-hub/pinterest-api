@@ -41,6 +41,8 @@ http://localhost:8000/docs for interactive Swagger UI.
 
     GET /search/gifs?q=<query>&page_size=25[&page_bookmark=...]
 
+    GET /search/suggestions?q=<partial>[&limit=8]   # autocomplete + typo correction
+
 Example:
 
     curl "http://localhost:8000/search?q=sunset%20aesthetic&page_size=10"
@@ -83,6 +85,20 @@ direct MP4 URLs. Costs one HTTP request per video result.
 **GIFs**: Pinterest has no server-side GIF filter; `/search/gifs` searches
 pins and filters to results whose original file is an animated `.gif`.
 GIFs are rarer than videos — expect fewer hits than image search.
+
+**Suggestions** (`/search/suggestions?q=`): query autocomplete / typo
+correction via Pinterest's own `AdvancedTypeaheadResource`. Type a partial
+or misspelled term ("asthetic") and the top suggested query is the fixed
+form ("aesthetic"). Item `type`: query | recent | pin | board | guide |
+user. Take the top `query` suggestion to re-run a corrected search.
+
+### Search accuracy (aligned with the real web app)
+
+The search request replicates an actual captured Pinterest
+`BaseSearchResource` call wholesale — same options field set and
+`rs: "typed"` + `auto_correction_disabled: False`, so Pinterest's typo
+auto-correction stays ON, plus the `X-App-Version` header the browser
+sends. Verified against a 93 MB HAR captured from a real Pinterest session.
 
 ### Pin detail & download
 

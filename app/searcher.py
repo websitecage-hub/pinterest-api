@@ -54,31 +54,47 @@ def _reset_session():
 
 def _search_payload(query: str, scope: str, page_size: int, bookmark: str | None,
                     filters: dict | None) -> str:
+    """Build the same options object the real Pinterest web app sends.
+
+    Field set matches a captured BaseSearchResource request wholesale so the
+    outgoing request is byte-for-byte faithful (reduces risk of Pinterest
+    balking at a "thin" payload). `rs: "typed"` + `auto_correction_disabled:
+    False` keep Pinterest's typo auto-correction ON, e.g. "asthetic" -> the
+    server still surfaces relevant aesthetic results.
+    """
     options = {
-        "article": None,
-        "appliedProductFilters": "---",
-        "auto_correction_disabled": False,
-        "corpus": None,
-        "custom_filters": None,
-        "entry": None,
-        "explicit_filters": None,
-        "filters": None,
-        "lang": "en",
-        "page_size": page_size,
         "query": query,
-        "query_pin_titles": None,
-        "rs": "typed",
         "scope": scope,
+        "appliedProductFilters": "---",
+        "domains": None,
+        "user": None,
+        "seoDrawerEnabled": False,
+        "applied_unified_filters": None,
+        "auto_correction_disabled": False,
+        "filter_genai": False,
+        "journey_depth": None,
         "source_id": None,
         "source_module_id": None,
-        "top_pin_id": None,
+        "source_url": f"/search/{scope}/?q={urllib.parse.quote(query)}&rs=typed",
+        "static_feed": False,
+        "selected_one_bar_modules": None,
+        "query_pin_sigs": None,
+        "page_size": page_size,
+        "gated": None,
+        "price_max": None,
+        "price_min": None,
+        "query_image_pins": None,
+        "request_params": None,
         "top_pin_ids": None,
-        "no_fetch_context_on_resource": False,
+        "article": None,
+        "corpus": None,
+        "filters": None,
+        "rs": "typed",
     }
-    if filters:
-        options.update(filters)
     if bookmark:
         options["bookmarks"] = [bookmark]
+    if filters:
+        options.update(filters)
     return json.dumps({"options": options, "context": {}})
 
 
@@ -110,9 +126,10 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
     try:
         r = s.get(url, headers={
             "X-Requested-With": "XMLHttpRequest",
-            "X-Pinterest-PWS-Handler": "www/search/[scope].js",
+            "X-Pinterest-PWS-Handler": f"www/search/{scope}.js",
             "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
             "Accept": "application/json, text/javascript, */*, q=0.01",
+            "X-App-Version": "6550262",
             "Referer": f"https://www.pinterest.com/search/{scope}/?q={query}",
         }, timeout=timeout)
     except requests.Timeout as e:
@@ -263,6 +280,81 @@ def detect_gifs(pins: list, timeout: int = 8, workers: int = 10) -> list:
     with ThreadPoolExecutor(max_workers=min(workers, len(pins))) as ex:
         hits = [p for p in ex.map(probe, pins) if p is not None]
     return hits
+
+
+def suggest(query: str, limit: int = 8, timeout: int = 15) -> dict:
+    """Query autocomplete / correction via the real AdvancedTypeaheadResource.
+
+    Mirrors the typeahead request captured from the real Pinterest web app.
+    Google/Bing-style: type "asthetic" and the top suggest is "aesthetic".
+    Each item's `type` is one of: query, recent, pin, board, guide, interesting.
+    Callers can use the top `query` suggestion to re-run a corrected search.
+    """
+    s = _get_session()
+    options = {
+        "field_set_key": "richResults",
+        "limit": limit,
+        "num_recent_queries": 0,
+        "personal_search_only": False,
+        "pin_scope": "pins",
+        "recent_queries_tags": "recent_queries,recent_personal_searches",
+        "term": query,
+        "autocomplete_request_surface": 0,
+    }
+    data = json.dumps({"options": options, "context": {}})
+    url = ("https://www.pinterest.com/resource/AdvancedTypeaheadResource/get/"
+           "?source_url=" + urllib.parse.quote("/search/", safe="")
+           + "&data=" + urllib.parse.quote(data, safe=""))
+    try:
+        r = s.get(url, headers={
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Pinterest-PWS-Handler": "www/search.js",
+            "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
+            "Accept": "application/json, text/javascript, */*, q=0.01",
+            "X-App-Version": "6550262",
+            "Referer": "https://www.pinterest.com/search/",
+        }, timeout=timeout)
+    except requests.RequestException as e:
+        raise SearchError(f"Pinterest suggestions failed: {e}") from e
+    if r.status_code in (401, 403):
+        _reset_session()
+        raise SearchError("Pinterest rejected suggestions (session) — retry once")
+    r.raise_for_status()
+    j = r.json()
+    items = (j.get("resource_response", {}).get("data") or {}).get("items") or []
+
+    def _norm(it: dict) -> dict:
+        t = it.get("type")
+        base = {"type": t}
+        if t == "query":
+            base.update(query=it.get("query"),
+                        display=it.get("display_text") or it.get("query"))
+        elif t == "pin":
+            base.update(id=it.get("id"),
+                        title=it.get("grid_title") or it.get("title"),
+                        image=self_or(it, "images", "236x", "url"))
+        elif t == "board":
+            base.update(board_name=it.get("name"),
+                        image=self_or(it, "images", "236x", "url"))
+        elif t == "guide":
+            base.update(query=it.get("query"),
+                        slug=it.get("slug"),
+                        image=self_or(it, "images", "236x", "url"))
+        return base
+
+    return {
+        "query": query,
+        "suggestions": [_norm(it) for it in items if isinstance(it, dict)],
+        "hits": len(items),
+    }
+
+
+def self_or(node: dict, section: str, key: str, field: str, default=None):
+    """drill node[section][key][field] if present, else default."""
+    try:
+        return node[section][key][field]
+    except (KeyError, TypeError):
+        return default
 
 
 def _normalize_pin(p: dict) -> dict:

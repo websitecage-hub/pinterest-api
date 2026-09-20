@@ -122,6 +122,7 @@ def index():
             "search": "/search?q=<query>[&page_bookmark=<bookmark>][&page_size=N][&media_type=video|gif]",
             "search_videos": "/search/videos?q=<query>",
             "search_gifs": "/search/gifs?q=<query>",
+            "search_suggestions": "/search/suggestions?q=<partial> (autocomplete / typo correction)",
             "pin_info": "/pin/{id}/info",
             "download_best": "/pin/{id}/download",
             "download_all_zip": "/pin/{id}/download/all",
@@ -208,6 +209,22 @@ def search_gifs(q: str = Query(..., min_length=1, max_length=100),
     res["next_bookmark"] = bm
     res["has_more"] = bool(bm)
     return _strip_internal(res)
+
+
+@app.get("/search/suggestions")
+def search_suggestions(q: str = Query(..., min_length=1, max_length=100, description="partial query for autocomplete"),
+                       limit: int = Query(8, ge=1, le=20, description="max suggestions")):
+    """Query autocomplete / typo correction from Pinterest's typeahead API.
+
+    e.g. q="asthetic" -> top suggestion is "aesthetic". Type can be query/recent/
+    pin/board/guide/interesting. Take the top `query` suggestion to re-search.
+    """
+    try:
+        return searcher.suggest(q, limit=limit)
+    except searcher.SearchError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Pinterest suggestions failed: {e}")
 
 
 # ---------- pin detail / download ----------

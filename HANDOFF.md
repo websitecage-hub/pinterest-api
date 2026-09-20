@@ -15,8 +15,40 @@ search, pinimg CDNs for media). FastAPI + Python 3.12, no API key required.
 
 Repo: https://github.com/websitecage-hub/pinterest-api (public), branch `main`.
 
-## State at handoff — v2.2 (all fixes applied AND live-verified)
+## Session 2026-09-19 — v2.3 (HAR-aligned / accuracy pass)
 
+Work done this session (from a fresh clone, then live-verified):
+
+- Cloned repo fresh, ran setup.sh + test_api.sh: all 7 groups passed live
+  against Pinterest (state was already at v2.2.1 — /gallery had landed).
+- Analyzed a 93 MB HAR (`pinterest-hars.har`, 866 entries) captured from a
+  real Pinterest session in a browser. Key findings applied:
+  1. `BaseSearchResource` — the real web app sends a fuller options object
+     than v2.2 did. Rewrote `app/searcher.py::_search_payload` to replicate
+     the captured payload field-for-field (added domains/user/seoDrawerEnabled/
+     applied_unified_filters/filter_genai/journey_depth/source_url/static_feed/
+     selected_one_bar_modules/query_pin_sigs/gated/price_max/price_min/
+     query_image_pins/request_params; kept `rs:"typed"` + `auto_correction_
+     disabled:False` so Pinterest's typo auto-correction stays ON). Kept the
+     scripted `page_size` (the API is page-based) instead of the browser's
+     `null`.
+  2. Added the `X-App-Version: 6550262` header and corrected
+     `X-Pinterest-PWS-Handler` to `www/search/{scope}.js`, matching the real
+     request fingerprint.
+  3. NEW endpoint `GET /search/suggestions?q=<partial>[&limit=N]` using the
+     real `AdvancedTypeaheadResource` (autocomplete + typo correction).
+     Verified live: q=asthetic -> top suggestion "aesthetic"; q=motivat ->
+     "motivational wallpaper", "motivation", etc. Items typed as query/
+     recent/pin/board/guide/user.
+- Re-ran full test suite after changes: still 7/7 pass, zero regression.
+
+Note: the HAR captures an authenticated/dummy session (cookies _auth=1 +
+_pinterest_sess; user-agent was an Android/Pixel 9 mobile Chrome). The API
+continues to work on the unauth path (warm session on pinterest.com). The
+captured cookies are session-specific and NOT reusable/committed — the code
+only cribs the request SHAPE, never the tokens.
+
+## State at handoff — v2.2 (all fixes applied AND live-verified)
 Work done in this session, in order:
 
 1. Cloned repo, reviewed all code (app/main.py, searcher.py, extractor.py,
