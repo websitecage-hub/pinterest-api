@@ -111,7 +111,7 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 
 # ---------- index / health ----------
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def index():
     return {
         "name": "Pinterest Media API",
@@ -133,7 +133,7 @@ def index():
     }
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"ok": True}
 
