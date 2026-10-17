@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -22,9 +23,14 @@ from dataclasses import dataclass, field
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+# Pinterest serves two id shapes: legacy numeric ("7810999345573240") and the
+# newer opaque form ("e1_AfqPShy50Pph1fYw8AHXYvOCsd4oe9ssdeNNgw0lGRsTTS7FIqGotA").
+# Search results now return the opaque form, so both must be accepted or every
+# download of a fresh search hit 400s.
 PIN_URL_RE = re.compile(
-    r"(?:https?://(?:[a-z-]+\.)?pinterest\.[a-z.]+/)?pin/(?:[^/?#]*?--)?(\d{5,25})"
+    r"(?:https?://(?:[a-z-]+\.)?pinterest\.[a-z.]+/)?pin/(?:[^/?#]*?--)?([A-Za-z0-9_-]{5,})"
 )
+BARE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{5,}$")
 RELAY_RE = re.compile(
     r'__PWS_RELAY_REGISTER_COMPLETED_REQUEST__\("([^"]*)"\s*,\s*'
 )
@@ -51,6 +57,147 @@ def _fetch(url: str, timeout: int = 20) -> str:
     })
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", "replace")
+
+
+_api_lock = threading.Lock()
+_api_sess = None
+
+
+def _api_session():
+    """Warmed session for Pinterest's internal JSON resources (POST).
+
+    Reuses searcher's cookie helpers so PINTEREST_COOKIE (authenticated mode)
+    applies here too — which is what unlocks save counts and personalization.
+    """
+    global _api_sess
+    with _api_lock:
+        if _api_sess is not None:
+            return _api_sess
+        import requests
+        s = requests.Session()
+        s.headers.update({"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
+        s.get("https://www.pinterest.com/", timeout=15)
+        try:
+            from searcher import _env_cookie_string, _apply_cookie
+            cookie = _env_cookie_string()
+            if cookie:
+                _apply_cookie(s, cookie)
+        except Exception:
+            pass
+        s.headers.update({
+            "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
+            "X-Requested-With": "XMLHttpRequest",
+            "X-App-Version": "6550262",
+            "X-Pinterest-AppState": "active",
+            "Accept": "application/json",
+        })
+        _api_sess = s
+        return s
+
+
+def _reset_api_session():
+    global _api_sess
+    with _api_lock:
+        _api_sess = None
+
+
+def pin_from_resource(pin_id: str, timeout: int = 20) -> dict | None:
+    """Fetch a pin as JSON via the internal PinResource (POST).
+
+    Richer and more reliable than scraping the SSR page: carries save counts,
+    comment/reaction counts, every image size and all video variants.
+    Returns None when Pinterest has no such pin on this surface (which is the
+    case for the opaque search-surface ids like "e1_...").
+    """
+    import requests
+    s = _api_session()
+    payload = json.dumps({"options": {"id": pin_id, "field_set_key": "detailed"},
+                          "context": {}})
+    try:
+        r = s.post("https://www.pinterest.com/resource/PinResource/get/",
+                   data={"source_url": f"/pin/{pin_id}/", "data": payload},
+                   timeout=timeout)
+    except requests.RequestException:
+        return None
+    if r.status_code in (401, 403):
+        _reset_api_session()
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        j = r.json()
+    except ValueError:
+        return None
+    rr = j.get("resource_response", {})
+    if rr.get("status") != "success":
+        return None
+    return rr.get("data") or None
+
+
+def manifest_from_resource(pin: dict, pin_id: str) -> dict:
+    """PinResource JSON (snake_case) -> the same manifest schema as SSR."""
+    images = {}
+    for size, spec in (pin.get("images") or {}).items():
+        if isinstance(spec, dict) and isinstance(spec.get("url"), str):
+            images[size] = spec["url"]
+
+    videos = _dedupe(_collect_videos(pin.get("videos") or {}, [])
+                     + _collect_videos(pin.get("story_pin_data") or {}, []))
+    mp4s = [v for v in videos if v["url"].endswith(".mp4")]
+    best_video = None
+    if mp4s:
+        def rank(v):
+            url = v["url"]
+            tier = 0 if "/720p/" in url else (2 if "expMp4" in url else 1)
+            return (tier, -(v.get("width") or 0), -(v.get("height") or 0))
+        best_video = sorted(mp4s, key=rank)[0]
+    elif videos:
+        best_video = videos[0]
+
+    best_image = images.get("orig") or images.get("736x") or images.get("564x")
+
+    apd = pin.get("aggregated_pin_data") or {}
+    stats = apd.get("aggregated_stats") or {}
+
+    if videos or pin.get("is_video"):
+        pin_type = "video"
+    elif best_image and best_image.lower().endswith(".gif"):
+        pin_type = "gif"
+    elif best_image:
+        pin_type = "image"
+    else:
+        pin_type = "unknown"
+
+    return {
+        "pin_id": pin_id,
+        "type": pin_type,
+        "title": pin.get("title") or pin.get("grid_title") or pin.get("seo_title"),
+        "description": pin.get("description") or pin.get("seo_description"),
+        "alt_text": pin.get("alt_text") or pin.get("seo_alt_text"),
+        "creator": (pin.get("pinner") or {}).get("username"),
+        "creator_followers": (pin.get("pinner") or {}).get("follower_count"),
+        "creator_verified": bool((pin.get("pinner") or {}).get("verified_identity")
+                                 or (pin.get("pinner") or {}).get("is_verified_merchant")),
+        "board_url": (pin.get("board") or {}).get("url"),
+        "link": pin.get("link"),
+        "domain": pin.get("domain"),
+        # quality metrics the logged-out search payload never carries:
+        "saves": stats.get("saves"),
+        "comments": pin.get("comment_count"),
+        "repins": pin.get("repin_count"),
+        "shares": pin.get("share_count"),
+        "reactions": pin.get("reaction_counts"),
+        "dominant_color": pin.get("dominant_color"),
+        "created_at": pin.get("created_at"),
+        "image_signature": pin.get("image_signature"),
+        "best_image": best_image,
+        "images": images,
+        "best_video": best_video["url"] if best_video else None,
+        "videos": videos,
+        "carousel": [],
+        "is_idea_pin": bool((pin.get("story_pin_data") or {}).get("pages")),
+        "source": "resource_api",
+    }
 
 
 def _scan_json(text: str, start: int) -> tuple[dict, int]:
@@ -264,7 +411,7 @@ def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
     payload — a second fetch usually gets the full one). Manifests are
     cached 1h (pinimg URLs are stable), making repeated video search
     resolution near-instant."""
-    pin_id = pin_id_from(url_or_id) or (url_or_id if url_or_id.isdigit() else None)
+    pin_id = pin_id_from(url_or_id) or (url_or_id.strip() if BARE_ID_RE.match(url_or_id.strip()) else None)
     if not pin_id:
         raise ValueError(f"cannot parse pin id from {url_or_id!r}")
 
@@ -278,6 +425,20 @@ def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
     if cached is not None:
         return deep_copy_if(cached)
 
+    # 1) Internal JSON resource API first — richer (save counts, all sizes,
+    #    every video variant) and immune to SSR/scraping variance.
+    if pin_id.isdigit():
+        try:
+            data = pin_from_resource(pin_id, timeout)
+            if data:
+                manifest = manifest_from_resource(data, pin_id)
+                if manifest["type"] != "unknown":
+                    _pin_cache.set(("pin", pin_id), deep_copy_if(manifest), 3600)
+                    return manifest
+        except Exception:
+            pass
+
+    # 2) SSR relay scrape (legacy fallback; also covers pinned older ids)
     last_err = None
     for attempt in range(retries + 1):
         try:
@@ -289,10 +450,20 @@ def get_pin(url_or_id: str, timeout: int = 20, retries: int = 2) -> dict:
                     _pin_cache.set(("pin", pin_id), deep_copy_if(manifest), 3600)
                     return manifest
             last_err = PinNotFoundError(
-                f"pin {pin_id} not found (page loaded but has no pin data)")
+                _not_found_message(pin_id))
         except Exception as e:
             last_err = e
     raise last_err
+
+
+def _not_found_message(pin_id: str) -> str:
+    """Explain *why* a pin id is unfetchable, since the two id spaces differ."""
+    if not pin_id.isdigit():
+        return (f"pin id {pin_id!r} is a search-surface id (opaque, e.g. 'e1_...'). "
+                "Pinterest does not serve those at /pin/<id>/, so it cannot be "
+                "fetched directly — use the media URLs returned by /search "
+                "(best_image / images / videos) or pass them to /download?url=")
+    return f"pin {pin_id} not found (page loaded but has no pin data)"
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ import io
 import json
 import os
 import sys
+import urllib.parse
 import zipfile
 
 # allow "python -m uvicorn app.main:app" from the project root:
@@ -40,7 +41,7 @@ from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
-    version="2.0.0",
+    version="2.4.0",
     description="Search & download images, videos, GIFs from Pinterest. "
                 "Public API — no key, no auth. Like Pixabay/Pexels, for Pinterest.",
 )
@@ -115,19 +116,21 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 def index():
     return {
         "name": "Pinterest Media API",
-        "version": "2.0.0",
+        "version": "2.4.0",
         "auth": "none — public API, no key required",
         "docs": "/docs (Swagger UI)",
         "endpoints": {
-            "search": "/search?q=<query>[&page_bookmark=<bookmark>][&page_size=N][&media_type=video|gif]",
+            "search": "/search?q=<query>[&page_bookmark=<bookmark>][&page_size=1..100][&media_type=video|gif]",
             "search_videos": "/search/videos?q=<query>",
             "search_gifs": "/search/gifs?q=<query>",
             "search_suggestions": "/search/suggestions?q=<partial> (autocomplete / typo correction)",
+            "session_status": "/session/status (anonymous vs personalized mode)",
             "pin_info": "/pin/{id}/info",
             "download_best": "/pin/{id}/download",
             "download_all_zip": "/pin/{id}/download/all",
             "stream_inline": "/pin/{id}/stream",
             "resolve_url": "/resolve?url=<pin url>",
+            "download_by_url": "/download?url=<i.pinimg.com media url> (works for opaque-id search results)",
         },
         "pagination": "pass next_bookmark from a response as page_bookmark param",
     }
@@ -138,11 +141,24 @@ def health():
     return {"ok": True}
 
 
+@app.get("/session/status")
+def session_status():
+    """Whether the API is running anonymous (default) or personalized.
+
+    Set PINTEREST_COOKIE / PINTEREST_COOKIE_FILE on the host to switch to
+    logged-in, personalized results. Cookie values are never returned.
+    """
+    try:
+        return searcher.session_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"session check failed: {e}")
+
+
 # ---------- search ----------
 
 @app.get("/search")
 def search_pins(q: str = Query(..., min_length=1, max_length=100, description="search query"),
-                page_size: int = Query(25, ge=1, le=50),
+                page_size: int = Query(25, ge=1, le=100),
                 page_bookmark: str | None = Query(None, description="from previous response"),
                 media_type: str | None = Query(None, description="'video' or 'gif' to filter"),
                 resolve_mp4: bool = Query(False, description="fetch per-pin detail to get direct MP4 URLs for video results (slower)"),
@@ -165,7 +181,7 @@ def search_pins(q: str = Query(..., min_length=1, max_length=100, description="s
 
 @app.get("/search/videos")
 def search_videos(q: str = Query(..., min_length=1, max_length=100),
-                  page_size: int = Query(25, ge=1, le=50),
+                  page_size: int = Query(25, ge=1, le=100),
                   page_bookmark: str | None = None,
                   resolve_mp4: bool = Query(True, description="fetch per-pin detail for direct MP4 URLs"),
                   ):
@@ -180,7 +196,7 @@ def search_videos(q: str = Query(..., min_length=1, max_length=100),
 
 @app.get("/search/gifs")
 def search_gifs(q: str = Query(..., min_length=1, max_length=100),
-                page_size: int = Query(25, ge=1, le=50),
+                page_size: int = Query(25, ge=1, le=100),
                 page_bookmark: str | None = None,
                 pages: int = Query(1, ge=1, le=3, description="probe up to N pages to collect enough gifs")):
     # Pinterest has no server-side gif filter — probe /originals/{sig}.gif
@@ -301,6 +317,40 @@ def resolve(url: str = Query(..., description="Any pinterest pin URL")):
     if not pid:
         raise HTTPException(status_code=400, detail=f"not a pinterest pin URL: {url}")
     return _manifest_or_404(url)
+
+
+# Pinterest serves some search hits under opaque ids ("e1_...") that it will
+# not resolve at /pin/<id>/. Their media is still on the public CDN, so expose
+# a direct proxy for it.
+ALLOWED_MEDIA_HOSTS = ("i.pinimg.com", "v1.pinimg.com", "v.pinimg.com")
+
+
+@app.get("/download")
+def download_by_url(url: str = Query(..., description="direct i.pinimg.com / v1.pinimg.com media URL from a /search result"),
+                    inline: bool = Query(False, description="serve inline instead of as an attachment")):
+    """Proxy-download any Pinterest CDN media URL.
+
+    Use the `best_image` / `images.*` / `videos[].url` values returned by
+    /search — this works even for pins whose opaque id cannot be resolved.
+    Only Pinterest CDN hosts are accepted.
+    """
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in ALLOWED_MEDIA_HOSTS):
+        raise HTTPException(status_code=400,
+                            detail="only Pinterest CDN URLs (i.pinimg.com / v1.pinimg.com) are allowed")
+    try:
+        r = downloader.stream_media(url)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"media fetch failed: {e}")
+    fname = os.path.basename(urllib.parse.urlparse(url).path) or "media"
+    return StreamingResponse(
+        r.iter_content(chunk_size=1 << 16),
+        media_type=downloader.content_type_for(url, dict(r.headers)),
+        headers={
+            "Content-Disposition": f'{"inline" if inline else "attachment"}; filename="{fname}"',
+            "Cache-Control": "public, max-age=86400",
+        },
+    )
 
 
 # kept for backward compat with v1 clients

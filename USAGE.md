@@ -22,9 +22,45 @@ All examples below use the live Render URL. For local, swap the host.
 
 <br>
 
+## 0. Result quality, session mode & opaque ids (read first)
+
+**Default = anonymous.** Results are byte-identical to what pinterest.com shows
+in a private window (verified: same pin ids, same order). That surface carries no
+save counts and no personalized ranking — that is a Pinterest limit, not an API one.
+
+**Personalized mode.** Set `PINTEREST_COOKIE` (or `PINTEREST_COOKIE_FILE` = path
+to a file holding it, or `PINTEREST_SESSION` = just the `_pinterest_sess` value)
+as an environment variable on the host, then restart. All searches then run with
+your logged-in session and return your personalized ranking.
+
+    # Render: Dashboard -> your service -> Environment -> add
+    #   PINTEREST_COOKIE = <full cookie header from your browser DevTools>
+    # verify:
+    GET /session/status
+    -> {"authenticated": true, "mode": "personalized (session cookie injected)", ...}
+
+Grab the cookie from DevTools → Network → any pinterest.com request → Request
+Headers → `cookie`. Never commit it; prefer a throwaway account if the URL is
+public (a leaked session cookie is a hijackable account).
+
+**Opaque ids.** Pinterest's search returns some hits under opaque ids such as
+`e1_AfqPShy50Pph1fYw8AHXYvOCsd4oe9ssdeNNgw0lGRsTTS7FIqGotA`. Pinterest will not
+serve those at `/pin/<id>/` — its own API returns `PinNotFound` — and they can't
+be resolved to a numeric id. Their media is still public, so:
+
+- read `best_image` / `images.*` / `videos[].url` straight from the search response
+- download with `GET /download?url=<that CDN url>`
+
+`/pin/{id}/info|download|stream` answer 404 with that explanation for opaque ids.
+Legacy numeric ids resolve normally and now include **save counts**.
+
+<br>
+
 ## 1. Search pins
 
     GET /search?q=<query>[&page_size=25][&page_bookmark=<bm>][&media_type=video|gif][&resolve_mp4=true]
+
+`page_size` accepts 1–100 (Pinterest returns up to 99 pins per page).
 
 Params:
 - `q` (required) — search text

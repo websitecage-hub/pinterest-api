@@ -10,6 +10,7 @@ No API key, no login. Scope: pins, videos, or all via the scope field.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,14 @@ def _get_session() -> requests.Session:
         })
         r = s.get("https://www.pinterest.com/", timeout=15)
         r.raise_for_status()
+        # Optional authenticated ("personalized") mode: if the operator has
+        # exported their own Pinterest session cookie, inject it here so
+        # results match what *they* see logged in (interest-graph ranking,
+        # save counts, richer metadata). Off by default — the public API
+        # stays key-free and anonymous.
+        cookie = _env_cookie_string()
+        if cookie:
+            _apply_cookie(s, cookie)
         if "csrftoken" not in s.cookies:
             raise RuntimeError("Pinterest did not set csrftoken")
         _session = s
@@ -50,6 +59,60 @@ def _reset_session():
     global _session
     with _session_lock:
         _session = None
+
+
+def _env_cookie_string() -> str | None:
+    """The operator's Pinterest cookie, if they opted into session mode.
+
+    Precedence: PINTEREST_COOKIE (raw "k=v; k=v" string) >
+    PINTEREST_COOKIE_FILE (path to a file holding it) >
+    PINTEREST_SESSION (bare _pinterest_sess value).
+    Returns None in the default anonymous mode.
+    """
+    raw = os.environ.get("PINTEREST_COOKIE")
+    if raw and raw.strip():
+        return raw.strip()
+    path = os.environ.get("PINTEREST_COOKIE_FILE")
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.read().strip()
+            return content or None
+        except OSError:
+            return None
+    sess = os.environ.get("PINTEREST_SESSION")
+    if sess and sess.strip():
+        return f"_pinterest_sess={sess.strip()}"
+    return None
+
+
+def _apply_cookie(s: requests.Session, cookie: str) -> None:
+    """Attach a raw Cookie header string to the session."""
+    for part in cookie.split(";"):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if k:
+            s.cookies.set(k, v, domain=".pinterest.com")
+
+
+def session_status() -> dict:
+    """Diagnostics for session mode. Never returns cookie values."""
+    s = _get_session()
+    names = {c.name for c in s.cookies}
+    authed = bool(_env_cookie_string())
+    return {
+        "authenticated": authed,
+        "mode": "personalized (session cookie injected)" if authed
+                else "anonymous (logged-out surface)",
+        "has_session_cookie": "_pinterest_sess" in names,
+        "has_auth_flag": "_auth" in names,
+        "cookie_count": len(names),
+        "note": ("Anonymous results are byte-identical to pinterest.com in a "
+                 "private window. Set PINTEREST_COOKIE (or PINTEREST_COOKIE_FILE) "
+                 "to get the personalized, logged-in ranking and save counts."),
+    }
 
 
 def _search_payload(query: str, scope: str, page_size: int, bookmark: str | None,
@@ -113,7 +176,7 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
     except NameError:
         _search_cache = TTLCache(max_entries=512)
 
-    cache_key = ("search", query, scope, page_size, bookmark)
+    cache_key = ("search", bool(_env_cookie_string()), query, scope, page_size, bookmark)
     cached = _search_cache.get(cache_key)
     if cached is not None:
         return deep_copy_if(cached)
@@ -410,6 +473,11 @@ def _normalize_pin(p: dict) -> dict:
         "saves": None,
         "reactions": p.get("reaction_counts") or None,
         "pin_url": f"https://www.pinterest.com/pin/{p.get('id')}/",
+        "domain": p.get("domain"),
+        "is_promoted": bool(p.get("is_promoted")),
+        "creator_followers": (p.get("pinner") or {}).get("follower_count"),
+        "creator_verified": bool((p.get("pinner") or {}).get("verified_identity")
+                                 or (p.get("pinner") or {}).get("is_verified_merchant")),
         "best_image": best_image,
         "images": img_urls,
         "best_video": best_video["url"] if best_video else None,

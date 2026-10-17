@@ -8,9 +8,44 @@ Built by reverse-engineering Pinterest's unauthenticated web surface:
 
 | Function | Pinterest internal mechanism |
 |---|---|
-| Pin detail | SSR relay payload (`v3GetPinQueryv2` GraphQL) embedded in `/pin/{id}/` pages |
+| Pin detail | internal `PinResource` JSON endpoint (POST) — primary; SSR relay payload (`v3GetPinQueryv2`) as fallback |
 | Search | internal `BaseSearchResource` resource endpoint (session cookies, no login) |
 | Media files | streamed straight from `i.pinimg.com` / `v1.pinimg.com` CDNs |
+
+### Result quality (read this)
+
+Out of the box this API is **anonymous** — it serves the exact same result set
+that pinterest.com serves in a private window (verified: identical pin ids, same
+order). That surface is deliberately thin: it carries **no save counts** and no
+personalized ranking.
+
+Two things change that:
+
+| Mode | How | What you get |
+|---|---|---|
+| Anonymous (default) | nothing to configure | logged-out ranking; `reaction_counts` only |
+| Personalized | set `PINTEREST_COOKIE` (or `PINTEREST_COOKIE_FILE`) on the host | your logged-in ranking + save counts on `/pin/{id}/info` |
+
+    # e.g. on Render: Environment -> PINTEREST_COOKIE = "<paste browser cookie>"
+    # then: GET /session/status  ->  {"authenticated": true, ...}
+
+Read that cookie from your own browser (DevTools → Network → any pinterest.com
+request → Request Headers → `cookie`). **Never commit it.** Use a throwaway
+account if you point the API at a public URL — a leaked session cookie is a
+hijackable account.
+
+### Opaque "e1_..." ids
+
+Pinterest's search now returns some hits under opaque ids (e.g.
+`e1_AfqPShy50Pph1fYw8...`). Pinterest does **not** serve those at `/pin/<id>/`
+(its own API answers `PinNotFound`) and they cannot be resolved to a numeric id.
+Their media is still public on the CDN, so:
+
+* `/search` already returns `best_image`, `images.*` and `videos[].url` for them
+* download them through `GET /download?url=<that CDN url>` (allow-listed to Pinterest CDNs)
+
+`/pin/{id}/info|download|stream` return a 404 with that explanation for opaque ids.
+Legacy numeric ids work normally and now return **save counts** via `PinResource`.
 
 ## Quick start
 
@@ -36,12 +71,17 @@ http://localhost:8000/docs for interactive Swagger UI.
 ### Search
 
     GET /search?q=<query>&page_size=25[&page_bookmark=<bookmark>][&media_type=video|gif][&resolve_mp4=false]
+    # page_size accepts 1..100 (Pinterest returns up to 99 per page)
 
     GET /search/videos?q=<query>&page_size=25[&page_bookmark=...][&resolve_mp4=true]
 
     GET /search/gifs?q=<query>&page_size=25[&page_bookmark=...]
 
     GET /search/suggestions?q=<partial>[&limit=8]   # autocomplete + typo correction
+
+    GET /session/status                             # anonymous vs personalized mode
+
+    GET /download?url=<i.pinimg.com media url>[&inline=false]   # CDN proxy (opaque-id results)
 
 Example:
 

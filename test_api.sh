@@ -73,15 +73,28 @@ file "$DIR/img.jpg" "$DIR/vid.mp4" | cut -c1-95
 
 echo "=== 7. search->download integration ==="
 python3 - <<'PY'
-import json, urllib.request
+import json, urllib.error, urllib.parse, urllib.request
+
 with urllib.request.urlopen("http://127.0.0.1:8000/search?q=cats&page_size=10", timeout=30) as r:
     d = json.load(r)
-pin_id = d["results"][0]["id"]
-url = f"http://127.0.0.1:8000/pin/{pin_id}/download"
-with urllib.request.urlopen(url, timeout=60) as r:
-    data = r.read()
-print(f"downloaded search-result pin {pin_id}: {len(data)} bytes, "
-      f"content-type: {r.headers.get('content-type')}")
+pin = d["results"][0]
+pid = pin["id"]
+print(f"first result id: {pid[:44]}{'...' if len(pid) > 44 else ''}")
+
+# Numeric (legacy) ids resolve as pins; opaque "e1_..." search-surface ids do
+# not, and are downloaded via their CDN URL instead.
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:8000/pin/{pid}/download", timeout=60) as r:
+        data = r.read()
+    print(f"  /pin/<id>/download -> {len(data)} bytes, {r.headers.get('content-type')}")
+except urllib.error.HTTPError as e:
+    print(f"  /pin/<id>/download -> HTTP {e.code} (opaque id: expected)")
+    img = pin.get("best_image")
+    assert img, "no best_image to fall back to"
+    u = "http://127.0.0.1:8000/download?url=" + urllib.parse.quote(img, safe="")
+    with urllib.request.urlopen(u, timeout=60) as r:
+        data = r.read()
+    print(f"  /download?url=best_image -> {len(data)} bytes, {r.headers.get('content-type')}")
 PY
 
 echo
