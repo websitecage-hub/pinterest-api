@@ -4,7 +4,7 @@ This file lets ANY new machine (and a fresh Hermes Agent session) resume this
 project exactly where it left off. It was created because the working VM could
 shut down at any moment.
 
-Last updated: 2026-09-18 (UTC), pushed right after the resilience-fix commit.
+Last updated: 2026-10-17 (UTC), pushed right after the v2.5 commit.
 
 ## What this project is
 
@@ -14,6 +14,29 @@ web surface (SSR relay payloads for pin detail, BaseSearchResource for
 search, pinimg CDNs for media). FastAPI + Python 3.12, no API key required.
 
 Repo: https://github.com/websitecage-hub/pinterest-api (public), branch `main`.
+Live: https://pinterest-api-inyg.onrender.com (Render, Docker, auto-deploy on push to main).
+
+## Session 2026-10-17 — v2.5 (opaque-id downloads + any-query gallery)
+
+- Opened up the result quality question: proved the API is a 100%-faithful
+  mirror of Pinterest's *logged-out* search (identical pin IDs/order), so the
+  "lame results" gap is Pinterest's own logged-out ranking, not our code.
+  Optional personalized mode added: set `PINTEREST_COOKIE` /
+  `PINTEREST_COOKIE_FILE`; `GET /session/status` reports anonymous vs personalized.
+- Opaque search ids (`e1_...`) do not resolve at `/pin/<id>/` (Pinterest itself
+  returns `PinNotFound`). Added `GET /download?url=<cdn url>` (i.pinimg.com /
+  v1.pinimg.com only) so every search hit's media is downloadable, plus
+  `GET /gallery` any-query visual grid that renders through that proxy.
+- Video MP4 resolution now covers opaque ids: the MP4 path is derived from the
+  HLS signature (`/videos/mc/<tier>/aa/bb/cc/<sig>.mp4`, tiers 720→240, probed
+  best-first, cached 6h incl. negative cache). Some pins are truly HLS-only —
+  `best_video` is then null and `videos[]` carries the `.m3u8` (play via hls.js).
+- `page_size` raised to 100; `PinResource` (POST) added for richer pin JSON.
+- Live-verified on Render v2.5.0: `/`, `/health`, `/search`, `/search/videos`
+  (10/23 direct-MP4, rest HLS-only), `/search/gifs`, `/search/suggestions`,
+  `/gallery`, `/session/status`, `/download?url=` all 200.
+- Local `bash test_api.sh` — 7/7 groups pass; `spike/test_hls_ladder_cache.py`
+  — all assertions pass.
 
 ## Session 2026-09-19 — v2.3 (HAR-aligned / accuracy pass)
 
