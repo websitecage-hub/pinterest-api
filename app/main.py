@@ -8,6 +8,7 @@ Reverse-engineered from Pinterest's unauthenticated web surface:
 Endpoints:
   GET /                              API index
   GET /health                        liveness
+  GET /gallery?q=...                 visual result grid for any query (browser)
   GET /search?q=...                  search pins (paginate via bookmark)
   GET /search/videos?q=...           search video pins only
   GET /search/gifs?q=...             search animated (GIF) pins only
@@ -41,7 +42,7 @@ from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
-    version="2.4.0",
+    version="2.5.0",
     description="Search & download images, videos, GIFs from Pinterest. "
                 "Public API — no key, no auth. Like Pixabay/Pexels, for Pinterest.",
 )
@@ -116,10 +117,11 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 def index():
     return {
         "name": "Pinterest Media API",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "auth": "none — public API, no key required",
         "docs": "/docs (Swagger UI)",
         "endpoints": {
+            "gallery": "/gallery?q=<query> (visual grid in a browser, any query)",
             "search": "/search?q=<query>[&page_bookmark=<bookmark>][&page_size=1..100][&media_type=video|gif]",
             "search_videos": "/search/videos?q=<query>",
             "search_gifs": "/search/gifs?q=<query>",

@@ -66,7 +66,20 @@ Legacy numeric ids work normally and now return **save counts** via `PinResource
 Open http://localhost:8000/ for the endpoint index,
 http://localhost:8000/docs for interactive Swagger UI.
 
+**Want to just look at results?** Open http://localhost:8000/gallery — type any
+query, get a grid of thumbnails (hover a video to play it, click a tile to open
+the pin). Media-filter and page-size controls are in the bar, and the query is
+deep-linkable: `/gallery?q=sunset+aesthetic`.
+
 ## Endpoints
+
+### Gallery
+
+    GET /gallery?q=<query>       # browser view: thumbnail grid for any query
+
+Self-contained HTML page (no build step). It renders media through the
+`/download?url=` CDN proxy rather than `/pin/{id}/stream`, because most search
+hits now carry opaque ids that do not resolve at `/pin/<id>/`.
 
 ### Search
 
@@ -119,8 +132,23 @@ Response shape (Pixabay/Pexels-like):
 
 **Videos**: Pinterest's search endpoint only returns HLS (.m3u8) URLs.
 With `resolve_mp4=true` (default ON for `/search/videos`, opt-in for
-`/search`), the API additionally fetches each pin's detail page to extract
-direct MP4 URLs. Costs one HTTP request per video result.
+`/search`), the API resolves direct MP4 URLs, in two ways:
+
+1. Numeric pin ids — fetch the pin's detail page and read its MP4 ladder.
+2. Opaque "e1_..." ids — no pin page exists, so the MP4 path is *derived*
+   from the HLS signature (`.../hls/aa/bb/cc/<sig>.m3u8` →
+   `.../720p/aa/bb/cc/<sig>.mp4`), probing 720p downward and stopping at the
+   first tier that exists. Results are cached 6h per signature.
+
+**Not every video has an MP4.** Some newer pins are published HLS-only —
+measured 10 of 22 on one `/search/videos` page, 13 of 25 on another. For those
+`best_video` is `null` and `videos[]` carries the `V_HLSV4` manifest URL, which
+plays fine in a browser player (hls.js) but is not a progressive MP4 download.
+Treat `best_video` as "MP4 available", not "video available":
+
+    mp4  = result['best_video']                                     # download this
+    hls  = next((v['url'] for v in result['videos']
+                 if v['url'].endswith('.m3u8')), None)              # play this
 
 **GIFs**: Pinterest has no server-side GIF filter; `/search/gifs` searches
 pins and filters to results whose original file is an animated `.gif`.
@@ -182,6 +210,17 @@ JavaScript:
 `spike/` contains the full reverse-engineering toolkit (12 probe scripts) —
 if Pinterest ever changes their markup and endpoints start 502ing, re-run
 those probes to re-map the structure.
+
+## Verified against (2026-10-17)
+
+- `bash test_api.sh` — all 7 groups pass live (search / videos / gifs /
+  pagination / pin downloads / search→download, plus the opaque-id path)
+- `/gallery?q=aesthetic+wallpaper` — 200, grid renders opaque-id media through
+  `/download?url=` (image → 200 `image/jpeg`; video → 200 `video/mp4` 4.8 MB)
+- video search timing — first call ~8-10 s (22 pins, 22 opaque, ladder probes),
+  repeat call 0.02-0.05 s (search + ladder caches)
+- `spike/test_hls_ladder_cache.py` — asserts positive and negative ladder
+  caching, sig extraction, and that HLS-only assets are skipped
 
 ## Verified against (2026-09-17)
 

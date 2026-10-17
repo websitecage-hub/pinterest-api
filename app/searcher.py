@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +23,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 _session = None
 _session_lock = threading.Lock()
+_hls_ladder_cache = None  # signature -> best mp4 tier ("" when HLS-only)
 
 
 class SearchError(Exception):
@@ -289,6 +291,98 @@ def resolve_mp4s_many(pins: list, timeout: int = 15, workers: int = 8) -> list:
         return list(ex.map(resolve_mp4s, pins))
 
 
+_HLS_LADDER_TIERS = ("720p", "540p", "480p", "360p", "240p")
+_HLS_SIG_RE = re.compile(r"([0-9a-f]{32})")
+
+
+def _hls_sig(url: str) -> str | None:
+    """Pull the 32-hex asset signature out of an HLS url."""
+    if not isinstance(url, str) or not url.endswith(".m3u8"):
+        return None
+    m = _HLS_SIG_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _mp4_tier_for_sig(sig: str, timeout: int = 8) -> str:
+    """Best existing MP4 tier for an HLS signature, or "" when there is none.
+
+    Probes tiers best-first and stops at the first hit. Cached 6h — the ladder
+    is immutable for a given asset, so repeats cost zero HEAD requests. Some
+    assets genuinely are HLS-only (no .mp4 anywhere on the CDN); those are
+    negative-cached so we stop re-probing them on every search.
+    """
+    from cache import TTLCache
+    global _hls_ladder_cache
+    if _hls_ladder_cache is None:
+        _hls_ladder_cache = TTLCache(max_entries=20000)
+    key = ("hls_ladder", sig)
+    hit = _hls_ladder_cache.get(key)
+    if hit is not None:
+        return hit
+    pfx = f"{sig[0:2]}/{sig[2:4]}/{sig[4:6]}"
+    found = ""
+    for tier in _HLS_LADDER_TIERS:
+        url = f"https://v1.pinimg.com/videos/mc/{tier}/{pfx}/{sig}.mp4"
+        try:
+            r = requests.head(url, headers={"User-Agent": UA}, timeout=timeout,
+                              allow_redirects=True)
+        except requests.RequestException:
+            continue
+        if r.status_code == 200:
+            found = tier
+            break
+    _hls_ladder_cache.set(key, found, 6 * 3600)
+    return found
+
+
+def _derive_mp4s_from_hls(videos: list, timeout: int = 8, workers: int = 6) -> list:
+    """Derive direct MP4 urls from HLS signatures.
+
+    Search video results expose only .m3u8. Normally we fetch the pin page to
+    read the MP4 ladder, but opaque ("e1_...") search ids have no pin page.
+    The MP4 path is deterministic from the signature embedded in the HLS url:
+
+        .../videos/mc/hls/58/fe/7e/58fe7ee4e2631861c8eb247436b13792.m3u8
+        .../videos/mc/720p/58/fe/7e/58fe7ee4e2631861c8eb247436b13792.mp4
+
+    Returns [{variant, url, width, height, durationMs, thumbnail}], one entry
+    per distinct signature that has an MP4, best tier first. Empty when the
+    assets are HLS-only (Pinterest publishes no MP4 for some newer pins).
+    """
+    sigs: dict = {}
+    for v in videos or []:
+        sig = _hls_sig(v.get("url"))
+        if sig and sig not in sigs:
+            sigs[sig] = v
+    if not sigs:
+        return []
+    with ThreadPoolExecutor(max_workers=min(workers, len(sigs))) as ex:
+        tiers = dict(zip(sigs, ex.map(lambda s: _mp4_tier_for_sig(s, timeout), sigs)))
+    out = []
+    for sig, v in sigs.items():
+        tier = tiers.get(sig)
+        if not tier:
+            continue
+        pfx = f"{sig[0:2]}/{sig[2:4]}/{sig[4:6]}"
+        out.append({
+            "variant": tier,
+            "url": f"https://v1.pinimg.com/videos/mc/{tier}/{pfx}/{sig}.mp4",
+            "width": v.get("width"),
+            "height": v.get("height"),
+            "durationMs": v.get("durationMs"),
+            "thumbnail": v.get("thumbnail"),
+        })
+    return out
+
+
+def _is_opaque_id(pid) -> bool:
+    """Pinterest's newer search-surface ids ("e1_...") have no /pin/<id>/ page.
+
+    Only legacy numeric ids resolve there, so callers can skip the doomed fetch.
+    """
+    return not str(pid or "").isdigit()
+
+
 def resolve_mp4s(pin: dict, timeout: int = 15) -> dict:
     """Given a normalized search-result pin with only HLS, fetch the pin's
     detail page (relay payload) and pull its MP4 variants + best_video.
@@ -296,19 +390,31 @@ def resolve_mp4s(pin: dict, timeout: int = 15) -> dict:
     Pinterest search results only expose .m3u8 (HLS) URLs; the detail page
     embeds av1Mp4/expMp4 files at 240/360/540/720 widths. Manifests are
     cached (extractor-level, 1h TTL), so repeated searches stay fast.
+
+    When the pin has an opaque search id (no pin page exists), fall back to
+    deriving the MP4 ladder from the HLS signature instead.
     """
     pid = pin.get("id")
     if not pid:
         return pin
-    try:
-        from extractor import get_pin
-        manifest = get_pin(pid, timeout=timeout)
-    except Exception:
-        return pin  # leave HLS-only on failure — still playable via hls.js
+    # Opaque ids 404 at /pin/<id>/ — don't burn a round trip on them; go
+    # straight to deriving the MP4 ladder from the HLS signature.
+    manifest = {}
+    if not _is_opaque_id(pid):
+        try:
+            from extractor import get_pin
+            manifest = get_pin(pid, timeout=timeout)
+        except Exception:
+            manifest = {}
     if manifest.get("best_video"):
         pin["best_video"] = manifest["best_video"]
     if manifest.get("videos"):
         pin["videos"] = _dedupe(list(manifest["videos"]) + list(pin.get("videos") or []))
+    if not pin.get("best_video"):
+        derived = _derive_mp4s_from_hls(pin.get("videos") or [], timeout=min(timeout, 8))
+        if derived:
+            pin["videos"] = _dedupe(derived + list(pin.get("videos") or []))
+            pin["best_video"] = derived[0]["url"]
     return pin
 
 
