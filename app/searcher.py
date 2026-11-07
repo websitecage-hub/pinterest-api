@@ -96,6 +96,26 @@ def _env_cookie_string() -> str | None:
     return None
 
 
+def _cookie_value(s: requests.Session, name: str) -> str:
+    """Read a cookie without raising on duplicate names.
+
+    Pinterest sets `csrftoken` for both `.pinterest.com` (the value we inject
+    from the operator's browser) and `www.pinterest.com` (from the warm-up
+    response). requests' jar then has two cookies with the same name and
+    `s.cookies.get(name)` raises CookieConflictError — which silently killed
+    every authenticated POST. Prefer the base-domain value, which is the one
+    the session was issued with.
+    """
+    values = []
+    for c in s.cookies:
+        if c.name != name:
+            continue
+        if (c.domain or "") == ".pinterest.com":
+            return c.value or ""
+        values.append(c.value or "")
+    return values[-1] if values else ""
+
+
 def _apply_cookie(s: requests.Session, cookie: str) -> None:
     """Attach a raw Cookie header string to the session."""
     for part in cookie.split(";"):
@@ -173,6 +193,38 @@ def verify_session(timeout: int = 15) -> dict:
     return out
 
 
+def _enrich_stats(pins: list, timeout: int = 12, workers: int = 8) -> None:
+    """Fill saves/comments/repins for numeric-id pins via PinResource.
+
+    The search payload carries reaction_counts but not save counts; PinResource
+    (POST, authenticated when a cookie is configured) has the full statistics.
+    Opaque ids can't be resolved and are left untouched. get_pin is cached 1h,
+    so repeat calls are cheap.
+    """
+    targets = [p for p in pins if p.get("id") and not _is_opaque_id(p["id"])]
+    if not targets:
+        return
+
+    def one(p):
+        try:
+            from extractor import get_pin
+            m = get_pin(p["id"], timeout=timeout)
+        except Exception:
+            return False
+        for k in ("saves", "comments", "repins", "reactions"):
+            if p.get(k) is None and m.get(k) is not None:
+                p[k] = m[k]
+        return True
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as ex:
+        ok = list(ex.map(one, targets))
+    # Second pass, sequential: a parallel burst makes Pinterest drop some
+    # requests, and those pins would otherwise come back with null stats.
+    for p, good in zip(targets, ok):
+        if not good:
+            one(p)
+
+
 def _search_payload(query: str, scope: str, page_size: int, bookmark: str | None,
                     filters: dict | None) -> str:
     """Build the same options object the real Pinterest web app sends.
@@ -248,7 +300,7 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
         r = s.get(url, headers={
             "X-Requested-With": "XMLHttpRequest",
             "X-Pinterest-PWS-Handler": f"www/search/{scope}.js",
-            "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
+            "X-CSRFToken": _cookie_value(s, "csrftoken"),
             "Accept": "application/json, text/javascript, */*, q=0.01",
             "X-App-Version": "6550262",
             "Referer": f"https://www.pinterest.com/search/{scope}/?q={query}",
@@ -534,7 +586,7 @@ def suggest(query: str, limit: int = 8, timeout: int = 15) -> dict:
         r = s.get(url, headers={
             "X-Requested-With": "XMLHttpRequest",
             "X-Pinterest-PWS-Handler": "www/search.js",
-            "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
+            "X-CSRFToken": _cookie_value(s, "csrftoken"),
             "Accept": "application/json, text/javascript, */*, q=0.01",
             "X-App-Version": "6550262",
             "Referer": "https://www.pinterest.com/search/",

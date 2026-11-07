@@ -164,6 +164,7 @@ def search_pins(q: str = Query(..., min_length=1, max_length=100, description="s
                 page_bookmark: str | None = Query(None, description="from previous response"),
                 media_type: str | None = Query(None, description="'video' or 'gif' to filter"),
                 resolve_mp4: bool = Query(False, description="fetch per-pin detail to get direct MP4 URLs for video results (slower)"),
+                include_stats: bool = Query(False, description="fetch save/comment/repin counts per pin (numeric ids only, slower)"),
                 ):
     res = _search_or_502(searcher.search, q, "pins", page_size, page_bookmark)
     if media_type == "video":
@@ -178,6 +179,8 @@ def search_pins(q: str = Query(..., min_length=1, max_length=100, description="s
             resolved = searcher.resolve_mp4s_many([res["results"][i] for i in vids])
             for i, r in zip(vids, resolved):
                 res["results"][i] = r
+    if include_stats:
+        searcher._enrich_stats(res["results"])
     return _strip_internal(res)
 
 
@@ -186,6 +189,7 @@ def search_videos(q: str = Query(..., min_length=1, max_length=100),
                   page_size: int = Query(25, ge=1, le=100),
                   page_bookmark: str | None = None,
                   resolve_mp4: bool = Query(True, description="fetch per-pin detail for direct MP4 URLs"),
+                  include_stats: bool = Query(False, description="fetch save/comment/repin counts per pin (numeric ids only, slower)"),
                   ):
     res = _search_or_502(searcher.search, q, "videos", page_size, page_bookmark)
     # the videos scope can still return image pins occasionally; filter hard
@@ -193,6 +197,8 @@ def search_videos(q: str = Query(..., min_length=1, max_length=100),
     res["hits"] = len(res["results"])
     if resolve_mp4:
         res["results"] = searcher.resolve_mp4s_many(res["results"])
+    if include_stats:
+        searcher._enrich_stats(res["results"])
     return _strip_internal(res)
 
 

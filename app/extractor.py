@@ -76,16 +76,21 @@ def _api_session():
         import requests
         s = requests.Session()
         s.headers.update({"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
-        s.get("https://www.pinterest.com/", timeout=15)
+        # Apply the operator cookie BEFORE warming (same reason as
+        # searcher._get_session): warming first binds an anonymous csrftoken
+        # to an authenticated session, and Pinterest 403s the POST.
         try:
-            from searcher import _env_cookie_string, _apply_cookie
-            cookie = _env_cookie_string()
-            if cookie:
-                _apply_cookie(s, cookie)
-        except Exception:
-            pass
+            from searcher import _env_cookie_string, _apply_cookie, _cookie_value
+        except Exception:  # pragma: no cover - defensive
+            _env_cookie_string = lambda: None          # noqa: E731
+            _apply_cookie = lambda sess, c: None       # noqa: E731
+            _cookie_value = lambda sess, n: ""         # noqa: E731
+        cookie = _env_cookie_string()
+        if cookie:
+            _apply_cookie(s, cookie)
+        s.get("https://www.pinterest.com/", timeout=15)
         s.headers.update({
-            "X-CSRFToken": str(s.cookies.get("csrftoken", "")),
+            "X-CSRFToken": _cookie_value(s, "csrftoken"),
             "X-Requested-With": "XMLHttpRequest",
             "X-App-Version": "6550262",
             "X-Pinterest-AppState": "active",
@@ -170,6 +175,7 @@ def manifest_from_resource(pin: dict, pin_id: str) -> dict:
 
     return {
         "pin_id": pin_id,
+        "id": pin_id,  # alias: search results expose the id as `id`
         "type": pin_type,
         "title": pin.get("title") or pin.get("grid_title") or pin.get("seo_title"),
         "description": pin.get("description") or pin.get("seo_description"),
@@ -386,6 +392,7 @@ def manifest_from_pin(pin: dict, pin_id: str) -> dict:
 
     return {
         "pin_id": pin_id,
+        "id": pin_id,  # alias: search results expose the id as `id`
         "type": pin_type,
         "title": pin.get("title") or pin.get("gridTitle") or pin.get("seoTitle"),
         "description": pin.get("description") or pin.get("seoDescription"),
