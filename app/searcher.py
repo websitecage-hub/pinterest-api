@@ -368,11 +368,12 @@ def _search_payload(query: str, scope: str, page_size: int, bookmark: str | None
 
 def search(query: str, scope: str = "pins", page_size: int = 25,
            bookmark: str | None = None, filters: dict | None = None,
-           timeout: int = 20, _retried: bool = False) -> dict:
+           timeout: int = 20, _retried: bool = False, fresh: bool = False) -> dict:
     """Search Pinterest. Returns {results, bookmark, total_hits_like, scope, query}.
 
     Raw result pages are cached 10 min (identical query+bookmark replays are
     instant); normalized output is rebuilt per call so pin typing is fresh.
+    Pass fresh=True to bypass the cache and hit Pinterest live.
     """
     from cache import TTLCache, deep_copy_if
     global _search_cache
@@ -382,9 +383,10 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
         _search_cache = TTLCache(max_entries=512)
 
     cache_key = ("search", bool(_env_cookie_string()), query, scope, page_size, bookmark)
-    cached = _search_cache.get(cache_key)
-    if cached is not None:
-        return deep_copy_if(cached)
+    if not fresh:
+        cached = _search_cache.get(cache_key)
+        if cached is not None:
+            return deep_copy_if(cached)
 
     s = _get_session()
     data = _search_payload(query, scope, page_size, bookmark, filters)
@@ -443,6 +445,55 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
     }
     _search_cache.set(cache_key, deep_copy_if(out), 600)
     return out
+
+
+def explore(query: str, scope: str = "pins", page_size: int = 25,
+            pages: int = 3, timeout: int = 25) -> dict:
+    """Rotating results: sample a page's worth of pins from a multi-page pool.
+
+    Pinterest's first page for a query is deterministic, so repeating a search
+    looks frozen — nothing like the app, where you keep seeing new pins. This
+    pulls up to `pages` pages (each cached individually, so only the first call
+    pays the latency), dedupes them into a pool, then samples `page_size` pins
+    at random. Consecutive calls therefore surface different pins from a bigger
+    pool, which is the app-like behaviour people expect.
+    """
+    import random
+
+    pool: list = []
+    seen: set = set()
+    bookmark = None
+    pages_fetched = 0
+    for _ in range(max(1, min(pages, 5))):
+        try:
+            res = search(query, scope, 100, bookmark, None, timeout)
+        except SearchError:
+            break
+        pages_fetched += 1
+        for pin in res.get("results") or []:
+            pid = pin.get("id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                pool.append(pin)
+        bookmark = res.get("next_bookmark")
+        if not bookmark:
+            break
+    if not pool:
+        return {"query": query, "scope": scope, "page_size": page_size,
+                "hits": 0, "results": [], "pool_size": 0, "pages_fetched": 0,
+                "next_bookmark": None, "has_more": False}
+    size = min(page_size, len(pool))
+    return {
+        "query": query,
+        "scope": scope,
+        "page_size": page_size,
+        "hits": size,
+        "results": random.sample(pool, size),
+        "pool_size": len(pool),
+        "pages_fetched": pages_fetched,
+        "next_bookmark": None,
+        "has_more": False,
+    }
 
 
 def _collect_videos(node, acc: list) -> list:

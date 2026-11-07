@@ -42,7 +42,7 @@ from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
-    version="2.7.0",
+    version="2.8.0",
     description="Search & download images, videos, GIFs from Pinterest. "
                 "Public API — no key, no auth. Like Pixabay/Pexels, for Pinterest.",
 )
@@ -117,12 +117,12 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 def index():
     return {
         "name": "Pinterest Media API",
-        "version": "2.7.0",
+        "version": "2.8.0",
         "auth": "none — public API, no key required",
         "docs": "/docs (Swagger UI)",
         "endpoints": {
             "gallery": "/gallery?q=<query> (visual grid in a browser, any query)",
-            "search": "/search?q=<query>[&page_bookmark=<bookmark>][&page_size=1..100][&media_type=video|gif]",
+            "search": "/search?q=<query>[&explore=true&pages=3][&fresh=true][&page_size=1..100][&media_type=video|gif][&include_stats=true]",
             "search_videos": "/search/videos?q=<query>",
             "search_gifs": "/search/gifs?q=<query>",
             "search_suggestions": "/search/suggestions?q=<partial> (autocomplete / typo correction)",
@@ -198,8 +198,15 @@ def search_pins(q: str = Query(..., min_length=1, max_length=100, description="s
                 media_type: str | None = Query(None, description="'video' or 'gif' to filter"),
                 resolve_mp4: bool = Query(False, description="fetch per-pin detail to get direct MP4 URLs for video results (slower)"),
                 include_stats: bool = Query(False, description="fetch save/comment/repin counts per pin (numeric ids only, slower)"),
+                explore: bool = Query(False, description="sample from a multi-page pool so repeated searches return different pins"),
+                pages: int = Query(3, ge=1, le=5, description="pool depth when explore=true"),
+                fresh: bool = Query(False, description="bypass the 10-minute result cache"),
                 ):
-    res = _search_or_502(searcher.search, q, "pins", page_size, page_bookmark)
+    if explore:
+        res = _search_or_502(searcher.explore, q, "pins", page_size, pages)
+    else:
+        res = _search_or_502(searcher.search, q, "pins", page_size, page_bookmark,
+                             fresh=fresh)
     if media_type == "video":
         res["results"] = [r for r in res["results"] if r["type"] == "video"]
         res["hits"] = len(res["results"])
@@ -223,8 +230,15 @@ def search_videos(q: str = Query(..., min_length=1, max_length=100),
                   page_bookmark: str | None = None,
                   resolve_mp4: bool = Query(True, description="fetch per-pin detail for direct MP4 URLs"),
                   include_stats: bool = Query(False, description="fetch save/comment/repin counts per pin (numeric ids only, slower)"),
+                  explore: bool = Query(False, description="sample from a multi-page pool so repeated searches return different pins"),
+                  pages: int = Query(3, ge=1, le=5),
+                  fresh: bool = Query(False, description="bypass the 10-minute result cache"),
                   ):
-    res = _search_or_502(searcher.search, q, "videos", page_size, page_bookmark)
+    if explore:
+        res = _search_or_502(searcher.explore, q, "videos", page_size, pages)
+    else:
+        res = _search_or_502(searcher.search, q, "videos", page_size, page_bookmark,
+                             fresh=fresh)
     # the videos scope can still return image pins occasionally; filter hard
     res["results"] = [r for r in res["results"] if r["type"] == "video"]
     res["hits"] = len(res["results"])

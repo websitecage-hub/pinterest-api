@@ -199,6 +199,26 @@ hls = next((v["url"] for v in result["videos"]
 
 <br>
 
+### 0.4 Explore mode — results that change every search
+
+Pinterest's first page for a query is deterministic, so repeating a search the
+same way returns the same pins and feels frozen. `explore=true` fixes that the
+way the app does — by drawing from a bigger pool:
+
+```bash
+curl -s "$BASE/search?q=cyberpunk+city+night&page_size=25&explore=true&pages=3"
+```
+
+It fetches up to `pages` pages (max 5), dedupes them into a pool, then samples
+`page_size` pins at random. Measured on the same query three times in a row:
+overlap 9/25, 3/25, 4/25 — different pins each call, from a 125-pin pool. First
+call ~6.5s (builds the pool), every call after ~10ms because the pages are
+cached individually.
+
+- `explore=true` — rotating sample (app-like "new results each time")
+- `pages=1..5` — pool depth (more pages = more variety, slower first call)
+- `fresh=true` — bypass the 10-minute cache and hit Pinterest live
+
 ## 1. Search pins
 
 ```
@@ -506,6 +526,27 @@ curl -s -o pin.zip "$B/pin/369858188161092508/download/all"
 ```
 
 <br>
+
+## 8. Browser gallery (the UI)
+
+Open `/gallery` — a Pinterest-style masonry browser, no build step, no external
+dependencies. `/gallery?q=<query>` deep-links a query.
+
+- **Search box** + media tabs (All / Videos / GIFs) + result count.
+- **Re-roll (↻)** — same query, new pins. This is `explore=true` under the hood.
+- **explore** toggle — on by default; turn it off for stable pagination with
+  infinite scroll (the grid auto-loads the next page as you scroll).
+- **stats** toggle — on by default; shows save/repin/reaction counts and creator
+  on each tile (uses `include_stats=true`).
+- **Hover** a tile for stats and quick actions: download, copy media URL.
+  **Click** for the lightbox: full media, metadata, and on video pins a
+  **Get MP4** button that resolves the direct MP4 on demand.
+- **Keys**: `/` focus search, `r` re-roll, `Esc` close, `←/→` move through
+  results, `Enter` search.
+- Media is served through `/download?url=`, so opaque `e1_...` pins render too.
+
+The status line reports hits, latency, pool size and whether the result came
+from cache — so you can see exactly what the API did.
 
 ## Error codes
 
