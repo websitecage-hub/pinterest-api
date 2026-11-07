@@ -42,7 +42,7 @@ from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
-    version="2.6.0",
+    version="2.7.0",
     description="Search & download images, videos, GIFs from Pinterest. "
                 "Public API — no key, no auth. Like Pixabay/Pexels, for Pinterest.",
 )
@@ -117,7 +117,7 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 def index():
     return {
         "name": "Pinterest Media API",
-        "version": "2.6.0",
+        "version": "2.7.0",
         "auth": "none — public API, no key required",
         "docs": "/docs (Swagger UI)",
         "endpoints": {
@@ -126,7 +126,8 @@ def index():
             "search_videos": "/search/videos?q=<query>",
             "search_gifs": "/search/gifs?q=<query>",
             "search_suggestions": "/search/suggestions?q=<partial> (autocomplete / typo correction)",
-            "session_status": "/session/status (anonymous vs personalized mode)",
+            "session_status": "/session/status (is it anonymous or personalized?)",
+            "session_refresh": "/session/refresh (re-check + hot-reload the cookie)",
             "pin_info": "/pin/{id}/info",
             "download_best": "/pin/{id}/download",
             "download_all_zip": "/pin/{id}/download/all",
@@ -140,7 +141,23 @@ def index():
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health():
-    return {"ok": True}
+    """Liveness + session state. No network calls — safe to poll every minute.
+
+    `session.healthy` is false only when a cookie is configured but Pinterest
+    rejected it, which is the state where results quietly go anonymous. Point a
+    monitor at this and you learn about an expired session immediately instead
+    of discovering it from odd results.
+    """
+    try:
+        session = searcher.session_state()
+        if session.get("configured") and session.get("verified") is None:
+            # First look (or 10-min cache expired): do one live check so the
+            # monitor sees a real yes/no instead of "unknown" forever.
+            searcher.verify_session()
+            session = searcher.session_state()
+    except Exception as e:  # never let diagnostics break liveness
+        session = {"healthy": True, "error": str(e)[:120]}
+    return {"ok": True, "session": session}
 
 
 @app.get("/session/status")
@@ -154,6 +171,22 @@ def session_status():
         return searcher.session_status()
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"session check failed: {e}")
+
+
+@app.get("/session/refresh")
+def session_refresh():
+    """Force a cookie re-check now, and hot-reload a rotated cookie file.
+
+    Use after replacing the cookie: no restart needed. On Render, changing the
+    env var already restarts the service, so this matters for file-based setups
+    (a volume-mounted cookie file that an external job rewrites).
+    """
+    try:
+        applied = searcher.reload_cookie_if_changed()
+        searcher._reset_session()
+        return {"cookie_change_applied": applied, **searcher.session_status()}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"session refresh failed: {e}")
 
 
 # ---------- search ----------

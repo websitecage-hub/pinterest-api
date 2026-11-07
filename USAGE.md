@@ -109,6 +109,40 @@ counts, and richer pin metadata. Also, Pinterest sees requests from your
 server's IP carrying your account, which from a datacenter can look like
 automation — use a secondary account and keep request rates modest.
 
+### 0.1.1 Self-healing & monitoring
+
+A Pinterest session cannot be made to never expire, and unattended re-login is
+not something you want (2FA, captcha, account-flag risk). So the design is:
+**heal automatically when you replace the cookie, and shout the moment it
+expires** instead of silently degrading.
+
+- **Hot reload.** The cookie is re-read on every request when either the
+  `PINTEREST_COOKIE` value or the mtime of `PINTEREST_COOKIE_FILE` changes.
+  Sessions rebuild themselves; the service is never restarted and never serves
+  a stale cookie. On a VM/Docker with a mounted cookie file, an external job
+  can refresh it and the API heals on the next request.
+  (On Render, editing an env var triggers a redeploy anyway, so that path is
+  for volume-mounted/file-based setups.)
+- **Mid-flight recovery.** A 401/403 from Pinterest rebuilds the session and
+  retries the request once — for search *and* pin detail — instead of returning
+  empty stats.
+- **Graceful degradation.** With a dead cookie the API keeps serving
+  (anonymous results, HTTP 200) rather than erroring.
+- **`/health` now tells you the truth:**
+
+```json
+{"ok": true, "session": {"mode": "personalized", "verified": true,
+ "healthy": true, "authenticated_as": "you", "cookie_source": "env:PINTEREST_COOKIE",
+ "last_checked_ago_s": 3}}
+```
+
+  `healthy` is `false` only when a cookie IS configured but Pinterest rejected
+  it — the one state where results silently go anonymous.
+- **Alerting.** Point a monitor at `/health` with keyword `"healthy":true`.
+  UptimeRobot flags it the moment the cookie dies, instead of you noticing odd
+  results days later.
+- **`GET /session/refresh`** — force a re-check and hot-reload right now.
+
 ### 0.2 Opaque ids (`e1_...`)
 
 Pinterest's search returns some hits under opaque ids such as

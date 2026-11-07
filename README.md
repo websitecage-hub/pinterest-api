@@ -211,6 +211,16 @@ JavaScript:
 if Pinterest ever changes their markup and endpoints start 502ing, re-run
 those probes to re-map the structure.
 
+## Verified against (2026-11-07)
+
+- authenticated mode, live account: anonymous search vs logged-in search on the
+  same query share **0 of 25 pins**; 25/25 save counts populated when the
+  session is accepted (`include_stats=true`), 4-5 s for 25 pins
+- self-healing: expiring the cookie file makes `/health` report
+  `healthy:false` (and search degrade to anonymous, HTTP 200); restoring the
+  file heals it with no restart — `verified:true, authenticated_as:<user>`
+- `bash test_api.sh` — all 7 groups pass
+
 ## Verified against (2026-10-17)
 
 - `bash test_api.sh` — all 7 groups pass live (search / videos / gifs /

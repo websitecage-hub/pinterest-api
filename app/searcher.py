@@ -26,6 +26,7 @@ _session = None
 _session_lock = threading.Lock()
 _hls_ladder_cache = None  # signature -> best mp4 tier ("" when HLS-only)
 _session_check = None  # (timestamp, verify_session result)
+_cookie_fingerprint = None  # identity of the configured cookie (hot-reload)
 
 
 class SearchError(Exception):
@@ -35,6 +36,8 @@ class SearchError(Exception):
 def _get_session() -> requests.Session:
     """Lazily create (and reuse) a session with Pinterest cookies. Thread-safe."""
     global _session
+    # Pick up a rotated cookie before handing out a session (self-healing).
+    reload_cookie_if_changed()
     with _session_lock:
         if _session is not None:
             return _session
@@ -94,6 +97,98 @@ def _env_cookie_string() -> str | None:
     if sess and sess.strip():
         return f"_pinterest_sess={sess.strip()}"
     return None
+
+
+def _cookie_fingerprint_now() -> tuple:
+    """Identity of the configured cookie: value + file mtime."""
+    raw = (os.environ.get("PINTEREST_COOKIE") or "").strip()
+    path = os.environ.get("PINTEREST_COOKIE_FILE") or ""
+    mtime = 0.0
+    if path and os.path.exists(path):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+    return (raw, path, round(mtime, 3))
+
+
+def reload_cookie_if_changed() -> bool:
+    """Pick up a rotated/refreshed cookie WITHOUT restarting the service.
+
+    Watches both the PINTEREST_COOKIE value and the mtime of
+    PINTEREST_COOKIE_FILE. When either changes, the session objects are torn
+    down so the next request re-warms with the new cookie — that's what makes
+    an expired session a non-event instead of an outage: drop in a fresh
+    cookie file and the API heals itself on the next request.
+
+    Returns True when a change was detected and applied.
+    """
+    global _cookie_fingerprint
+    now = _cookie_fingerprint_now()
+    if _cookie_fingerprint is None:
+        _cookie_fingerprint = now
+        return False
+    if now == _cookie_fingerprint:
+        return False
+    _cookie_fingerprint = now
+    _reset_session()
+    try:
+        from extractor import _reset_api_session
+        _reset_api_session()
+    except Exception:
+        pass
+    return True
+
+
+def session_state() -> dict:
+    """Cheap session summary for /health. Never makes a network call.
+
+    `healthy` is False only when a cookie IS configured but Pinterest rejected
+    it — the one state where results silently degrade to anonymous.
+    """
+    injected = _env_cookie_string() or ""
+    # Detect a rotated cookie BEFORE reporting: a cached "verified" from the
+    # previous cookie must not mask the new one, or a monitor would keep
+    # showing healthy for up to 10 minutes after the cookie expired.
+    try:
+        reload_cookie_if_changed()
+    except Exception:
+        pass
+    if os.environ.get("PINTEREST_COOKIE", "").strip():
+        source = "env:PINTEREST_COOKIE"
+    elif os.environ.get("PINTEREST_COOKIE_FILE"):
+        source = f"file:{os.environ['PINTEREST_COOKIE_FILE']}"
+    elif os.environ.get("PINTEREST_SESSION", "").strip():
+        source = "env:PINTEREST_SESSION"
+    else:
+        source = "none"
+    out = {
+        "mode": "personalized" if injected else "anonymous",
+        "cookie_source": source,
+        "configured": bool(injected),
+        "verified": None,
+        "authenticated_as": None,
+        "last_checked_ago_s": None,
+        "healthy": True,
+    }
+    if _session_check:
+        ts, payload = _session_check
+        out["verified"] = payload.get("verified")
+        out["authenticated_as"] = payload.get("authenticated_as")
+        out["last_checked_ago_s"] = round(time.time() - ts)
+    if injected and out["verified"] is False:
+        out["healthy"] = False
+        out["warning"] = ("Pinterest rejected the configured cookie — results "
+                          "are falling back to anonymous. Replace "
+                          "PINTEREST_COOKIE (or update the cookie file) and the "
+                          "API picks it up on the next request.")
+    return out
+
+
+# Baseline the fingerprint at import, so the first change after startup is
+# detected (otherwise the first reload call would just initialise and report
+# "no change").
+_cookie_fingerprint = _cookie_fingerprint_now()
 
 
 def _cookie_value(s: requests.Session, name: str) -> str:

@@ -70,6 +70,12 @@ def _api_session():
     applies here too — which is what unlocks save counts and personalization.
     """
     global _api_sess
+    # Self-healing: pick up a rotated cookie without a restart.
+    try:
+        from searcher import reload_cookie_if_changed
+        reload_cookie_if_changed()
+    except Exception:
+        pass
     with _api_lock:
         if _api_sess is not None:
             return _api_sess
@@ -115,14 +121,24 @@ def pin_from_resource(pin_id: str, timeout: int = 20) -> dict | None:
     case for the opaque search-surface ids like "e1_...").
     """
     import requests
-    s = _api_session()
     payload = json.dumps({"options": {"id": pin_id, "field_set_key": "detailed"},
                           "context": {}})
-    try:
-        r = s.post("https://www.pinterest.com/resource/PinResource/get/",
-                   data={"source_url": f"/pin/{pin_id}/", "data": payload},
-                   timeout=timeout)
-    except requests.RequestException:
+    r = None
+    for attempt in (0, 1):
+        s = _api_session()
+        try:
+            r = s.post("https://www.pinterest.com/resource/PinResource/get/",
+                       data={"source_url": f"/pin/{pin_id}/", "data": payload},
+                       timeout=timeout)
+        except requests.RequestException:
+            return None
+        if r.status_code in (401, 403) and attempt == 0:
+            # Session went stale mid-flight — rebuild once and retry rather
+            # than silently returning no stats (self-healing).
+            _reset_api_session()
+            continue
+        break
+    if r is None:  # pragma: no cover - defensive
         return None
     if r.status_code in (401, 403):
         _reset_api_session()
