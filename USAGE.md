@@ -46,29 +46,68 @@ open "$BASE/gallery?q=dark+aesthetic"
 
 ## 0. Concepts (read first)
 
-### 0.1 Anonymous vs personalized
+### 0.1 Anonymous vs personalized (your own account's results)
 
 **Default = anonymous.** Results are byte-identical to what pinterest.com shows
 in a private window (verified: same pin ids, same order). This surface carries no
 save counts and no personalized ranking — that's a Pinterest limit, not an API one.
 
-**Personalized mode.** Set `PINTEREST_COOKIE` (or `PINTEREST_COOKIE_FILE` = path
-to a file holding it, or `PINTEREST_SESSION` = just the `_pinterest_sess` value)
-as an environment variable on the host, then restart. All searches then run with
-your logged-in session and return your personalized ranking + save counts.
+**Personalized mode = your account.** Set `PINTEREST_COOKIE` and every search
+runs with your logged-in session: your interest graph ranks the results, and
+pins carry save/reaction counts.
+
+**Only three cookies matter:**
+
+| cookie | why it's needed |
+|---|---|
+| `_pinterest_sess` | the login session — without it nothing is personalized |
+| `csrftoken` | must be sent as `X-CSRFToken` on POSTs (pin detail); a mismatch = 403 |
+| `_auth=1` | marks the session authenticated |
+
+Everything else in the header (`datr`, `_routing_id`, `_pinterest_id`, …) is
+optional. Easiest is to copy the **entire** `cookie` header and paste it whole.
+
+**How to copy it**
+
+1. Log into pinterest.com in Chrome/Firefox.
+2. F12 → **Network** → click any request to `pinterest.com`.
+3. **Request Headers** → `cookie` → copy the whole value.
+   (Or **Application → Cookies → https://www.pinterest.com** and copy the three above.)
+
+**Where to put it** (do not paste it into chat or a ticket — it is a hijackable
+credential, same class as a password):
 
 ```bash
 # Render: Dashboard -> your service -> Environment -> add
-#   PINTEREST_COOKIE = <full cookie header from your browser DevTools>
+#   PINTEREST_COOKIE = <full cookie header>      then Save (auto-redeploys)
 
-# verify:
-curl -s "$BASE/session/status"
-# -> {"authenticated": true, "mode": "personalized (session cookie injected)", ...}
+# Local:
+export PINTEREST_COOKIE='_pinterest_sess=...; csrftoken=...; _auth=1'
+# or keep it in a file and point at it:
+export PINTEREST_COOKIE_FILE=$HOME/pinterest.cookie
 ```
 
-Grab the cookie from DevTools → Network → any pinterest.com request → Request
-Headers → `cookie`. Never commit it; prefer a throwaway account if the URL is
-public (a leaked session cookie is a hijackable account).
+**Verify it was accepted** — and this is the part that used to lie:
+
+```bash
+curl -s "$BASE/session/status"
+```
+
+| field | meaning |
+|---|---|
+| `authenticated` | a cookie is *configured* on the host |
+| `verified` | Pinterest **actually accepted** it (`isAuthenticated: true`) |
+| `authenticated_as` | the username Pinterest reports for that session |
+
+`authenticated: true` with `verified: false` means the cookie is expired or
+incomplete and your results are silently anonymous — recopy it.
+
+**Reality check:** personalized ranking is not pixel-identical to your phone
+feed — Pinterest also uses app-state and device signals we can't replay. What
+you get is the logged-in search surface: your interest graph ordering, save
+counts, and richer pin metadata. Also, Pinterest sees requests from your
+server's IP carrying your account, which from a datacenter can look like
+automation — use a secondary account and keep request rates modest.
 
 ### 0.2 Opaque ids (`e1_...`)
 

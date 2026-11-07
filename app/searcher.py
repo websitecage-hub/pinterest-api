@@ -13,6 +13,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,6 +25,7 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _session = None
 _session_lock = threading.Lock()
 _hls_ladder_cache = None  # signature -> best mp4 tier ("" when HLS-only)
+_session_check = None  # (timestamp, verify_session result)
 
 
 class SearchError(Exception):
@@ -41,16 +43,21 @@ def _get_session() -> requests.Session:
             "User-Agent": UA,
             "Accept-Language": "en-US,en;q=0.9",
         })
-        r = s.get("https://www.pinterest.com/", timeout=15)
-        r.raise_for_status()
         # Optional authenticated ("personalized") mode: if the operator has
         # exported their own Pinterest session cookie, inject it here so
         # results match what *they* see logged in (interest-graph ranking,
         # save counts, richer metadata). Off by default — the public API
         # stays key-free and anonymous.
+        #
+        # Order matters: the cookie must be applied BEFORE the warm-up request.
+        # Warming anonymously hands back a csrftoken bound to an anonymous
+        # session; pairing that with a logged-in _pinterest_sess makes
+        # Pinterest reject POSTs (PinResource) with 403.
         cookie = _env_cookie_string()
         if cookie:
             _apply_cookie(s, cookie)
+        r = s.get("https://www.pinterest.com/", timeout=15)
+        r.raise_for_status()
         if "csrftoken" not in s.cookies:
             raise RuntimeError("Pinterest did not set csrftoken")
         _session = s
@@ -58,9 +65,10 @@ def _get_session() -> requests.Session:
 
 
 def _reset_session():
-    global _session
+    global _session, _session_check
     with _session_lock:
         _session = None
+        _session_check = None
 
 
 def _env_cookie_string() -> str | None:
@@ -100,21 +108,69 @@ def _apply_cookie(s: requests.Session, cookie: str) -> None:
 
 
 def session_status() -> dict:
-    """Diagnostics for session mode. Never returns cookie values."""
+    """Diagnostics for session mode. Never returns cookie values.
+
+    Reports both "a cookie is configured" and "Pinterest accepts it" — those
+    are different things, and an expired cookie silently degrades results back
+    to the anonymous surface.
+    """
     s = _get_session()
     names = {c.name for c in s.cookies}
-    authed = bool(_env_cookie_string())
-    return {
+    injected = _env_cookie_string() or ""
+    injected_names = {p.split("=", 1)[0].strip()
+                      for p in injected.split(";") if "=" in p}
+    authed = bool(injected)
+    out = {
         "authenticated": authed,
         "mode": "personalized (session cookie injected)" if authed
                 else "anonymous (logged-out surface)",
-        "has_session_cookie": "_pinterest_sess" in names,
-        "has_auth_flag": "_auth" in names,
+        # NOTE: report the *injected* cookie, not the jar — Pinterest hands
+        # anonymous visitors their own _pinterest_sess, so checking the jar
+        # made this field true in anonymous mode.
+        "has_session_cookie": "_pinterest_sess" in injected_names,
+        "has_auth_flag": "_auth" in injected_names,
         "cookie_count": len(names),
         "note": ("Anonymous results are byte-identical to pinterest.com in a "
                  "private window. Set PINTEREST_COOKIE (or PINTEREST_COOKIE_FILE) "
                  "to get the personalized, logged-in ranking and save counts."),
     }
+    out.update(verify_session())
+    return out
+
+
+def verify_session(timeout: int = 15) -> dict:
+    """Ask Pinterest whether the injected cookie is genuinely logged in.
+
+    A configured cookie is not an accepted cookie: sessions expire and rotate.
+    This reads pinterest.com's own `isAuthenticated` flag, so /session/status
+    can distinguish the two instead of silently serving anonymous results.
+    Result is cached 10 min so the endpoint can be polled cheaply.
+    """
+    global _session_check
+    now = time.time()
+    if _session_check and now - _session_check[0] < 600:
+        return dict(_session_check[1])
+    try:
+        s = _get_session()
+        r = s.get("https://www.pinterest.com/", timeout=timeout)
+        html = r.text
+    except (requests.RequestException, RuntimeError) as e:
+        return {"verified": False, "error": f"{type(e).__name__}: {e}"[:200]}
+    m = re.search(r'"isAuthenticated":\s*(true|false)', html)
+    logged_in = bool(m and m.group(1) == "true")
+    out = {
+        "verified": logged_in,
+        "authenticated_as": None,
+    }
+    if logged_in:
+        um = re.search(r'"username":"([A-Za-z0-9_.-]{2,30})"', html)
+        out["authenticated_as"] = um.group(1) if um else None
+    elif _env_cookie_string():
+        out["hint"] = ("Pinterest does not accept the configured cookie "
+                       "(expired, incomplete, or region-mismatched) — results "
+                       "are falling back to the anonymous surface.")
+    _session_check = (now, dict(out))
+    return out
 
 
 def _search_payload(query: str, scope: str, page_size: int, bookmark: str | None,
