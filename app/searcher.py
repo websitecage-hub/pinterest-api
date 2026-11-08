@@ -27,6 +27,8 @@ _session_lock = threading.Lock()
 _hls_ladder_cache = None  # signature -> best mp4 tier ("" when HLS-only)
 _session_check = None  # (timestamp, verify_session result)
 _cookie_fingerprint = None  # identity of the configured cookie (hot-reload)
+_runtime_cookie = None  # cookie pushed at runtime via POST /session/cookie
+_active_cookie = 0  # index into the cookie pool (failover)
 
 
 class SearchError(Exception):
@@ -74,34 +76,111 @@ def _reset_session():
         _session_check = None
 
 
-def _env_cookie_string() -> str | None:
-    """The operator's Pinterest cookie, if they opted into session mode.
+def _parse_cookie_blob(blob: str) -> list:
+    """Accept a single cookie header, a JSON array, or one header per line.
 
-    Precedence: PINTEREST_COOKIE (raw "k=v; k=v" string) >
-    PINTEREST_COOKIE_FILE (path to a file holding it) >
-    PINTEREST_SESSION (bare _pinterest_sess value).
-    Returns None in the default anonymous mode.
+    Multiple cookies = a pool: the API fails over to the next one when the
+    active session dies, so one expired account is not an outage.
     """
-    raw = os.environ.get("PINTEREST_COOKIE")
-    if raw and raw.strip():
-        return raw.strip()
-    path = os.environ.get("PINTEREST_COOKIE_FILE")
-    if path and os.path.exists(path):
+    if not blob or not blob.strip():
+        return []
+    b = blob.strip()
+    if b.startswith("["):
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                content = fh.read().strip()
-            return content or None
+            items = json.loads(b)
+            return [str(x).strip() for x in items if str(x).strip()]
+        except ValueError:
+            pass
+    if "\n" in b:
+        return [ln.strip() for ln in b.splitlines() if ln.strip() and "=" in ln]
+    return [b]
+
+
+def _cookie_pool() -> list:
+    """All configured cookies, in priority order. Never logs values."""
+    if _runtime_cookie:
+        return [_runtime_cookie]
+    raw = os.environ.get("PINTEREST_COOKIE")
+    pool = _parse_cookie_blob(raw) if raw else []
+    if not pool:
+        path = os.environ.get("PINTEREST_COOKIE_FILE")
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    pool = _parse_cookie_blob(fh.read())
+            except OSError:
+                pool = []
+    if not pool:
+        sess = os.environ.get("PINTEREST_SESSION")
+        if sess and sess.strip():
+            pool = [f"_pinterest_sess={sess.strip()}"]
+    return pool
+
+
+def _runtime_cookie_blob() -> str:
+    """Cookie string to persist when one is pushed at runtime (JSON array if
+    the pool holds several, so a failover set survives a restart)."""
+    return json.dumps(_cookie_pool()) if len(_cookie_pool()) > 1 else (
+        _cookie_pool()[0] if _cookie_pool() else "")
+
+
+def set_runtime_cookie(cookie: str) -> bool:
+    """Replace the cookie at runtime and rebuild sessions (no restart).
+
+    Persists to PINTEREST_COOKIE_FILE when one is configured and writable, so
+    the refresh survives a restart on hosts with a mounted volume. Returns
+    whether the value was persisted to disk.
+    """
+    global _runtime_cookie, _active_cookie, _cookie_fingerprint
+    _runtime_cookie = cookie.strip()
+    _active_cookie = 0
+    _reset_session()
+    try:
+        from extractor import _reset_api_session
+        _reset_api_session()
+    except Exception:
+        pass
+    persisted = False
+    path = os.environ.get("PINTEREST_COOKIE_FILE")
+    if path:
+        try:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(_runtime_cookie_blob())
+            os.replace(tmp, path)
+            persisted = True
         except OSError:
-            return None
-    sess = os.environ.get("PINTEREST_SESSION")
-    if sess and sess.strip():
-        return f"_pinterest_sess={sess.strip()}"
-    return None
+            persisted = False
+    _cookie_fingerprint = _cookie_fingerprint_now()
+    return persisted
+
+
+def rotate_cookie() -> bool:
+    """Fail over to the next cookie in the pool. False when there is only one."""
+    global _active_cookie
+    pool = _cookie_pool()
+    if len(pool) < 2:
+        return False
+    _active_cookie = (_active_cookie + 1) % len(pool)
+    _reset_session()
+    try:
+        from extractor import _reset_api_session
+        _reset_api_session()
+    except Exception:
+        pass
+    return True
+
+
+def _env_cookie_string() -> str | None:
+    """The active cookie, if any. Precedence: runtime > env > file > session-only."""
+    pool = _cookie_pool()
+    if not pool:
+        return None
+    return pool[min(_active_cookie, len(pool) - 1)]
 
 
 def _cookie_fingerprint_now() -> tuple:
-    """Identity of the configured cookie: value + file mtime."""
-    raw = (os.environ.get("PINTEREST_COOKIE") or "").strip()
+    """Identity of the configured cookie SET: values + file mtime."""
     path = os.environ.get("PINTEREST_COOKIE_FILE") or ""
     mtime = 0.0
     if path and os.path.exists(path):
@@ -109,7 +188,7 @@ def _cookie_fingerprint_now() -> tuple:
             mtime = os.path.getmtime(path)
         except OSError:
             mtime = 0.0
-    return (raw, path, round(mtime, 3))
+    return (tuple(_cookie_pool()), path, round(mtime, 3))
 
 
 def reload_cookie_if_changed() -> bool:
@@ -123,7 +202,7 @@ def reload_cookie_if_changed() -> bool:
 
     Returns True when a change was detected and applied.
     """
-    global _cookie_fingerprint
+    global _cookie_fingerprint, _active_cookie
     now = _cookie_fingerprint_now()
     if _cookie_fingerprint is None:
         _cookie_fingerprint = now
@@ -131,6 +210,7 @@ def reload_cookie_if_changed() -> bool:
     if now == _cookie_fingerprint:
         return False
     _cookie_fingerprint = now
+    _active_cookie = 0  # new cookie set: start from the first again
     _reset_session()
     try:
         from extractor import _reset_api_session
@@ -166,6 +246,8 @@ def session_state() -> dict:
         "mode": "personalized" if injected else "anonymous",
         "cookie_source": source,
         "configured": bool(injected),
+        "cookie_pool_size": len(_cookie_pool()),
+        "active_cookie_index": _active_cookie,
         "verified": None,
         "authenticated_as": None,
         "last_checked_ago_s": None,
@@ -245,6 +327,8 @@ def session_status() -> dict:
         "has_session_cookie": "_pinterest_sess" in injected_names,
         "has_auth_flag": "_auth" in injected_names,
         "cookie_count": len(names),
+        "cookie_pool_size": len(_cookie_pool()),
+        "active_cookie_index": _active_cookie,
         "note": ("Anonymous results are byte-identical to pinterest.com in a "
                  "private window. Set PINTEREST_COOKIE (or PINTEREST_COOKIE_FILE) "
                  "to get the personalized, logged-in ranking and save counts."),
@@ -256,34 +340,50 @@ def session_status() -> dict:
 def verify_session(timeout: int = 15) -> dict:
     """Ask Pinterest whether the injected cookie is genuinely logged in.
 
-    A configured cookie is not an accepted cookie: sessions expire and rotate.
-    This reads pinterest.com's own `isAuthenticated` flag, so /session/status
-    can distinguish the two instead of silently serving anonymous results.
-    Result is cached 10 min so the endpoint can be polled cheaply.
+    A configured cookie is not an accepted cookie: sessions expire. This reads
+    pinterest.com's own `isAuthenticated` flag, so /session/status can tell the
+    two apart instead of silently serving anonymous results.
+
+    When the active cookie is rejected and the pool holds more than one, it
+    fails over to the next and re-checks — an expired account becomes a
+    non-event as long as any configured session is still alive. Result cached
+    10 min so the endpoint can be polled cheaply.
     """
     global _session_check
     now = time.time()
     if _session_check and now - _session_check[0] < 600:
         return dict(_session_check[1])
-    try:
-        s = _get_session()
-        r = s.get("https://www.pinterest.com/", timeout=timeout)
-        html = r.text
-    except (requests.RequestException, RuntimeError) as e:
-        return {"verified": False, "error": f"{type(e).__name__}: {e}"[:200]}
-    m = re.search(r'"isAuthenticated":\s*(true|false)', html)
-    logged_in = bool(m and m.group(1) == "true")
-    out = {
-        "verified": logged_in,
-        "authenticated_as": None,
-    }
-    if logged_in:
-        um = re.search(r'"username":"([A-Za-z0-9_.-]{2,30})"', html)
-        out["authenticated_as"] = um.group(1) if um else None
-    elif _env_cookie_string():
-        out["hint"] = ("Pinterest does not accept the configured cookie "
-                       "(expired, incomplete, or region-mismatched) — results "
-                       "are falling back to the anonymous surface.")
+    pool = _cookie_pool()
+    out = {"verified": False, "authenticated_as": None,
+           "active_cookie_index": _active_cookie}
+    for _ in range(max(1, len(pool))):
+        try:
+            s = _get_session()
+            r = s.get("https://www.pinterest.com/", timeout=timeout)
+            html = r.text
+        except (requests.RequestException, RuntimeError) as e:
+            return {"verified": False, "error": f"{type(e).__name__}: {e}"[:200]}
+        m = re.search(r'"isAuthenticated":\s*(true|false)', html)
+        if m and m.group(1) == "true":
+            um = re.search(r'"username":"([A-Za-z0-9_.-]{2,30})"', html)
+            out = {"verified": True,
+                   "authenticated_as": um.group(1) if um else None,
+                   "active_cookie_index": _active_cookie}
+            break
+        # Rejected: fail over to the next cookie in the pool, if there is one.
+        if not rotate_cookie():
+            break
+    if not out.get("verified") and pool:
+        out["active_cookie_index"] = _active_cookie
+        out["hint"] = (
+            f"Pinterest rejected the configured cookie "
+            f"({len(pool)} in the pool, all tried) — results are falling back "
+            f"to the anonymous surface. Push a fresh one to POST /session/cookie "
+            f"or replace PINTEREST_COOKIE." if len(pool) > 1 else
+            "Pinterest rejected the configured cookie (expired, incomplete, or "
+            "region-mismatched) — results are falling back to the anonymous "
+            "surface. Push a fresh one to POST /session/cookie or replace "
+            "PINTEREST_COOKIE.")
     _session_check = (now, dict(out))
     return out
 
@@ -413,8 +513,10 @@ def search(query: str, scope: str = "pins", page_size: int = 25,
                           timeout, _retried=True)
         raise SearchError(f"Pinterest connection failed: {e}") from e
     if r.status_code in (401, 403) and not _retried:
-        # session went stale mid-flight — one retry with fresh cookies
+        # Session went stale mid-flight: fail over to the next cookie in the
+        # pool when one exists, then retry once.
         _reset_session()
+        rotate_cookie()
         return search(query, scope, page_size, bookmark, filters, timeout,
                       _retried=True)
     if r.status_code in (429, 502, 503) and not _retried:

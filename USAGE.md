@@ -142,6 +142,44 @@ expires** instead of silently degrading.
   UptimeRobot flags it the moment the cookie dies, instead of you noticing odd
   results days later.
 - **`GET /session/refresh`** — force a re-check and hot-reload right now.
+- **Cookie pool with automatic failover.** `PINTEREST_COOKIE` accepts a JSON
+  array (or the cookie file accepts one header per line). When the active cookie
+  is rejected, the API fails over to the next and re-checks — one expired account
+  is no longer an outage. `/session/status` and `/health` report
+  `cookie_pool_size` and `active_cookie_index`.
+- **`POST /session/cookie`** — push a fresh cookie at runtime, no redeploy.
+  Disabled (404) unless `PINTEREST_ADMIN_TOKEN` is set; send it as
+  `X-Admin-Token`. Persists to `PINTEREST_COOKIE_FILE` when configured.
+
+```bash
+curl -X POST "$BASE/session/cookie" \
+  -H "content-type: application/json" -H "X-Admin-Token: $TOKEN" \
+  -d '{"cookie":"_pinterest_sess=...; csrftoken=...; _auth=1"}'
+```
+
+### 0.1.2 What "expiry-proof" honestly means
+
+Measured, not assumed: authenticated requests to Pinterest return **no
+Set-Cookie headers**, so there is no rotation to capture and activity does not
+extend the session deadline. Nothing renews a Pinterest session except logging
+in again — and the most-used library in this space (`py3-pinterest`, 391★)
+does that with **headless Chrome** plus email/password, and its own README says
+to re-login when 401/403 start appearing, roughly **every 15 days**.
+
+So the achievable design is:
+
+| concern | how it's handled |
+|---|---|
+| session dies | detected within one health check, reported as `healthy:false` |
+| recovery | one curl to `POST /session/cookie`, or drop in a new file — no restart |
+| one account dies | automatic failover to the next cookie in the pool |
+| all accounts die | API keeps serving anonymous at HTTP 200, never errors |
+| discovery | monitor `/health` for `"healthy":true` |
+
+What it will never do is log in for you. That needs your password, 2FA, and a
+browser capable of passing Pinterest's challenges from a datacenter IP — the
+fastest route to a locked account. Plan on refreshing a cookie occasionally;
+the pool is what makes it non-urgent.
 
 ### 0.2 Opaque ids (`e1_...`)
 

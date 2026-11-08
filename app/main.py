@@ -31,7 +31,7 @@ import zipfile
 # ensure sibling modules (extractor, downloader, searcher) are importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -42,7 +42,7 @@ from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
-    version="2.8.0",
+    version="2.9.0",
     description="Search & download images, videos, GIFs from Pinterest. "
                 "Public API — no key, no auth. Like Pixabay/Pexels, for Pinterest.",
 )
@@ -117,7 +117,7 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 def index():
     return {
         "name": "Pinterest Media API",
-        "version": "2.8.0",
+        "version": "2.9.0",
         "auth": "none — public API, no key required",
         "docs": "/docs (Swagger UI)",
         "endpoints": {
@@ -128,6 +128,7 @@ def index():
             "search_suggestions": "/search/suggestions?q=<partial> (autocomplete / typo correction)",
             "session_status": "/session/status (is it anonymous or personalized?)",
             "session_refresh": "/session/refresh (re-check + hot-reload the cookie)",
+            "session_cookie_set": "POST /session/cookie (push a fresh cookie at runtime)",
             "pin_info": "/pin/{id}/info",
             "download_best": "/pin/{id}/download",
             "download_all_zip": "/pin/{id}/download/all",
@@ -187,6 +188,40 @@ def session_refresh():
         return {"cookie_change_applied": applied, **searcher.session_status()}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"session refresh failed: {e}")
+
+
+@app.post("/session/cookie")
+async def session_cookie_set(request: Request):
+    """Push a fresh Pinterest cookie at runtime — no redeploy, no restart.
+
+    Disabled (404) unless PINTEREST_ADMIN_TOKEN is set; callers must send it in
+    the X-Admin-Token header. This is what makes expiry cheap to fix: one curl
+    from anywhere replaces the cookie, instead of a dashboard visit plus a
+    rebuild. The value is written to PINTEREST_COOKIE_FILE when one is
+    configured, so it also survives a restart.
+
+    Body: {"cookie": "_pinterest_sess=...; csrftoken=...; _auth=1"}
+    """
+    token = os.environ.get("PINTEREST_ADMIN_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=404, detail="not enabled (set PINTEREST_ADMIN_TOKEN)")
+    if request.headers.get("x-admin-token") != token:
+        raise HTTPException(status_code=401, detail="bad or missing X-Admin-Token")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="expected a JSON body")
+    cookie = str((body or {}).get("cookie", "")).strip()
+    if not cookie or "=" not in cookie:
+        raise HTTPException(status_code=400,
+                            detail="cookie must be a k=v; k=v header string")
+    persisted = searcher.set_runtime_cookie(cookie)
+    try:
+        searcher.verify_session()
+    except Exception:
+        pass
+    return {"updated": True, "persisted_to_file": persisted,
+            **searcher.session_status()}
 
 
 # ---------- search ----------

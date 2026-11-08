@@ -133,9 +133,15 @@ def pin_from_resource(pin_id: str, timeout: int = 20) -> dict | None:
         except requests.RequestException:
             return None
         if r.status_code in (401, 403) and attempt == 0:
-            # Session went stale mid-flight — rebuild once and retry rather
-            # than silently returning no stats (self-healing).
+            # Session went stale mid-flight — rebuild, fail over to the next
+            # cookie in the pool if there is one, and retry rather than
+            # silently returning no stats (self-healing).
             _reset_api_session()
+            try:
+                from searcher import rotate_cookie
+                rotate_cookie()
+            except Exception:
+                pass
             continue
         break
     if r is None:  # pragma: no cover - defensive
