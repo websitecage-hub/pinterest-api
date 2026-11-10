@@ -111,6 +111,20 @@ def _cookie_pool() -> list:
             except OSError:
                 pool = []
     if not pool:
+        # Email/password mode: use the cookie minted by the background login
+        # when it is ready. Never blocks a request; the login itself runs in a
+        # daemon thread and the next request picks the cookie up.
+        try:
+            from login import enabled, get_cookie, start_background
+            if enabled():
+                cookie = get_cookie()
+                if cookie:
+                    pool = [cookie]
+                else:
+                    start_background()
+        except Exception:
+            pass
+    if not pool:
         sess = os.environ.get("PINTEREST_SESSION")
         if sess and sess.strip():
             pool = [f"_pinterest_sess={sess.strip()}"]
@@ -242,6 +256,12 @@ def session_state() -> dict:
         source = "env:PINTEREST_SESSION"
     else:
         source = "none"
+        try:
+            from login import enabled, get_cookie
+            if enabled() and get_cookie():
+                source = "login:PINTEREST_EMAIL"
+        except Exception:
+            pass
     out = {
         "mode": "personalized" if injected else "anonymous",
         "cookie_source": source,
@@ -264,6 +284,11 @@ def session_state() -> dict:
                           "are falling back to anonymous. Replace "
                           "PINTEREST_COOKIE (or update the cookie file) and the "
                           "API picks it up on the next request.")
+    try:
+        from login import status as login_status
+        out["login"] = login_status()
+    except Exception:
+        pass
     return out
 
 
@@ -384,6 +409,15 @@ def verify_session(timeout: int = 15) -> dict:
             "region-mismatched) — results are falling back to the anonymous "
             "surface. Push a fresh one to POST /session/cookie or replace "
             "PINTEREST_COOKIE.")
+        # Email/password mode: the session died, so drop it and let the
+        # background login mint a fresh one (cooldown-guarded).
+        try:
+            from login import enabled, invalidate, start_background
+            if enabled():
+                invalidate()
+                start_background()
+        except Exception:
+            pass
     _session_check = (now, dict(out))
     return out
 

@@ -29,6 +29,21 @@ Two things change that:
     # e.g. on Render: Environment -> PINTEREST_COOKIE = "<paste browser cookie>"
     # then: GET /session/status  ->  {"authenticated": true, ...}
 
+### Email/password mode (v3.0)
+
+Instead of pasting a browser cookie, the API can log itself in with a Pinterest
+account and refresh the session automatically. Set:
+
+    PINTEREST_EMAIL / PINTEREST_PASSWORD     # account (or PIN_EMAIL / PIN_PASSWORD)
+    PINTEREST_ADMIN_TOKEN                    # optional: enables POST /session/login
+    PINTEREST_COOKIE_FILE                    # optional: persist the minted cookie
+
+On startup the API runs the login in the background (Arkose solver in
+`funcaptcha-solver/` + reCAPTCHA Enterprise via `BypassV3/`). Until it finishes
+the API serves the anonymous surface; once the cookie lands, searches become
+personalized with no restart. If Pinterest rejects it later, the next check
+re-logs in automatically. `GET /health` reports `session.login` state.
+
 Read that cookie from your own browser (DevTools → Network → any pinterest.com
 request → Request Headers → `cookie`). **Never commit it.** Use a throwaway
 account if you point the API at a public URL — a leaked session cookie is a

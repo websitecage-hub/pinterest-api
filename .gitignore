@@ -4,3 +4,7 @@ __pycache__/
 downloads/
 *.part
 .env
+pinterest_cli_session.json
+pinterest_cli_results.json
+pinterest_credentials.json
+node_modules/

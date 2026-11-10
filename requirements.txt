@@ -1,3 +1,13 @@
 fastapi>=0.110
 uvicorn>=0.29
 requests>=2.31
+curl-cffi>=0.16
+flask>=3.0
+colorama>=0.4
+pycryptodome>=3.20
+cryptography>=42
+javascript>=1.2
+PyExecJS>=1.5
+numpy>=1.26
+colr>=0.9
+blackboxprotobuf>=1.0

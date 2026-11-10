@@ -42,7 +42,7 @@ from gallery import register_gallery
 
 app = FastAPI(
     title="Pinterest Media API",
-    version="2.9.0",
+    version="3.0.0",
     description="Search & download images, videos, GIFs from Pinterest. "
                 "Public API — no key, no auth. Like Pixabay/Pexels, for Pinterest.",
 )
@@ -54,6 +54,16 @@ app.add_middleware(
 )
 
 register_gallery(app)
+
+
+@app.on_event("startup")
+def _startup_login():
+    """Kick off an email/password login in the background when configured."""
+    try:
+        from login import start_background
+        start_background()
+    except Exception:
+        pass
 
 DOWNLOADS_DIR = os.environ.get("PINTEREST_DOWNLOADS", "/tmp/pinterest-api-downloads")
 
@@ -117,7 +127,7 @@ def _proxy_download(manifest: dict, url: str, inline: bool):
 def index():
     return {
         "name": "Pinterest Media API",
-        "version": "2.9.0",
+        "version": "3.0.0",
         "auth": "none — public API, no key required",
         "docs": "/docs (Swagger UI)",
         "endpoints": {
@@ -129,6 +139,7 @@ def index():
             "session_status": "/session/status (is it anonymous or personalized?)",
             "session_refresh": "/session/refresh (re-check + hot-reload the cookie)",
             "session_cookie_set": "POST /session/cookie (push a fresh cookie at runtime)",
+            "session_login": "POST /session/login (email/password login -> personalized cookie; admin token)",
             "pin_info": "/pin/{id}/info",
             "download_best": "/pin/{id}/download",
             "download_all_zip": "/pin/{id}/download/all",
@@ -222,6 +233,29 @@ async def session_cookie_set(request: Request):
         pass
     return {"updated": True, "persisted_to_file": persisted,
             **searcher.session_status()}
+
+
+@app.post("/session/login")
+def session_login(request: Request):
+    """Log in with PINTEREST_EMAIL / PINTEREST_PASSWORD and install the cookie.
+
+    Same guard as /session/cookie: disabled unless PINTEREST_ADMIN_TOKEN is set.
+    This is the manual trigger for the automatic startup login; it blocks while
+    the Arkose/reCAPTCHA flow runs (~30-90s on a cold solver).
+    """
+    token = os.environ.get("PINTEREST_ADMIN_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=404, detail="not enabled (set PINTEREST_ADMIN_TOKEN)")
+    if request.headers.get("x-admin-token") != token:
+        raise HTTPException(status_code=401, detail="bad or missing X-Admin-Token")
+    try:
+        import login
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"login module unavailable: {e}")
+    if not login.enabled():
+        raise HTTPException(status_code=400,
+                            detail="set PINTEREST_EMAIL and PINTEREST_PASSWORD")
+    return login.login_now()
 
 
 # ---------- search ----------
