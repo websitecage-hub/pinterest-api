@@ -1,8 +1,7 @@
-fastapi>=0.110
-uvicorn>=0.29
+# Deployable Flask API + UI (reference_api.py)
+flask>=3.0
 requests>=2.31
 curl-cffi>=0.16
-flask>=3.0
 colorama>=0.4
 pycryptodome>=3.20
 cryptography>=42
@@ -11,3 +10,10 @@ PyExecJS>=1.5
 numpy>=1.26
 colr>=0.9
 blackboxprotobuf>=1.0
+
+# Rotating proxy pool (start.sh) - used for residential/proxy egress on heal
+proxy-scraper-cli
+
+# Legacy FastAPI service (app/) kept for reference; not used by start.sh
+fastapi>=0.110
+uvicorn>=0.29

@@ -57,15 +57,16 @@ def get_cookie():
 
 
 def status() -> dict:
-    return {
-        "enabled": enabled(),
-        "cookie_ready": bool(_cookie),
-        "authenticated_as": (_user or {}).get("username") if _user else None,
-        "attempts": _attempts,
-        "in_flight": _in_flight,
-        "last_error": _error,
-        "last_success_ago_s": (round(time.time() - _ok_at) if _ok_at else None),
-    }
+    with _lock:
+        return {
+            "enabled": enabled(),
+            "cookie_ready": bool(_cookie),
+            "authenticated_as": (_user or {}).get("username") if _user else None,
+            "attempts": _attempts,
+            "in_flight": _in_flight,
+            "last_error": _error,
+            "last_success_ago_s": (round(time.time() - _ok_at) if _ok_at else None),
+        }
 
 
 def _persist(cookie: str) -> bool:
@@ -85,14 +86,14 @@ def _persist(cookie: str) -> bool:
 
 
 def _do_login() -> bool:
-    """Perform one login. Caller holds the lock. Returns True on success."""
-    global _cookie, _user, _error, _attempt_at, _in_flight, _attempts, _ok_at
+    """Perform one login. Does NOT hold the lock while doing network work."""
+    global _cookie, _user, _error, _attempt_at, _attempts, _ok_at
     email, password = credentials()
     if not (email and password):
         return False
-    _attempt_at = time.time()
-    _attempts += 1
-    _in_flight = True
+    with _lock:
+        _attempt_at = time.time()
+        _attempts += 1
     try:
         from pinterest_cli import Pinterest
         client = Pinterest()
@@ -103,35 +104,41 @@ def _do_login() -> bool:
         cookie = client.cookie_header()
         if not cookie or "_pinterest_sess" not in cookie:
             raise RuntimeError("login produced no session cookie")
-        _cookie = cookie
-        _user = client.user or {}
-        _error = None
-        _ok_at = time.time()
+        with _lock:
+            _cookie = cookie
+            _user = client.user or {}
+            _error = None
+            _ok_at = time.time()
         _persist(cookie)
         return True
     except Exception as e:  # noqa: BLE001 - report, never crash the API
-        _error = f"{type(e).__name__}: {e}"[:300]
+        with _lock:
+            _error = f"{type(e).__name__}: {e}"[:300]
         return False
-    finally:
-        _in_flight = False
 
 
 def login_now() -> dict:
     """Blocking login (used by the admin endpoint). Returns status()."""
+    global _in_flight
     with _lock:
+        if _in_flight:
+            return status()
+        _in_flight = True
+    try:
         _do_login()
+    finally:
+        with _lock:
+            _in_flight = False
     return status()
 
 
 def start_background(force: bool = False) -> bool:
     """Kick off a login in a daemon thread unless one is already running.
 
-    Returns True when a thread was started. Respects the retry cooldown after
-    a failure so repeated requests cannot spin the captcha solver.
+    Returns True when a thread was started. Never blocks: state is checked and
+    reserved under the lock, then the slow work happens outside it.
     """
     global _in_flight
-    if not enabled():
-        return False
     with _lock:
         if _in_flight:
             return False
@@ -139,15 +146,19 @@ def start_background(force: bool = False) -> bool:
             return False
         if not force and _cookie:
             return False
-        _in_flight = True  # reserve before spawning; _do_login sets it too
+        if not enabled():
+            return False
+        _in_flight = True
 
     def run():
         global _in_flight
-        with _lock:
+        try:
             _do_login()
+        finally:
+            with _lock:
+                _in_flight = False
 
-    t = threading.Thread(target=run, name="pinterest-login", daemon=True)
-    t.start()
+    threading.Thread(target=run, name="pinterest-login", daemon=True).start()
     return True
 
 

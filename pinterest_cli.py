@@ -25,7 +25,7 @@ Logs in with email/password (request-based, no browser):
  3) funcaptcha-solver (folder `funcaptcha-solver/` next to this file) -
     solves the Arkose/FunCaptcha challenge. It needs:
         pip install flask curl-cffi colorama pycryptodome cryptography \\
-                    javascript PyExecJS numpy colr requests
+                    javascript execjs numpy colr requests
     The `javascript` package ships the embedded JS engine used by
     `arkose.js` (no separate Node.js install needed).
 
@@ -69,10 +69,32 @@ Logs in with email/password (request-based, no browser):
 Options:
   --email X --password Y      credentials (or env PIN_EMAIL / PIN_PASSWORD)
   --fresh                     ignore saved session, log in again
+  --cookies FILE              auth from cookies.txt / session JSON / HAR
+                              (use when Pinterest forced a password reset)
   --limit N                   rows to print (default 10; JSON always full)
+==========================================================================
+
+ IF PINTEREST SAYS "We reset your password to keep your Pins safe"
+ --------------------------------------------------------------------------
+ That is Pinterest's risk engine, not a code bug. It invalidates the
+ password when it sees an automated login from a new device/IP, so no
+ password will work anymore. A solver cannot bypass it. Two real options:
+
+   A) Reset the password in a browser (with access to the account email),
+      then use the new password with --password / PIN_PASSWORD.
+
+   B) Skip the password entirely: log in manually once in a browser (or
+      use a HAR of a logged-in tab) and feed its cookies to the script:
+          python pinterest_cli.py whoami --cookies cookies.txt
+          python pinterest_cli.py all    --cookies your_har.har
+      The session is then cached, so later runs need no password.
+
+  Use the same egress IP + normal browsing for the first login; hammering
+  the login endpoint from rotating IPs is what triggers the reset.
 ==========================================================================
 """
 import argparse
+import base64
 import json
 import os
 import socket
@@ -84,18 +106,26 @@ import urllib.parse
 from curl_cffi import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("PIN_DATA_DIR") or HERE
 BASE = "https://in.pinterest.com"
 SITEKEY = "F5675B21-025B-4843-983C-38D86DEB394B"
 RC_KEY = "6Ldx7ZkUAAAAAF3SZ05DRL2Kdh911tCa3qFP0-0r"
 RC_ACTION = "login"
 SOLVER = "http://127.0.0.1:8003"
 SOLVER_DIR = os.path.join(HERE, "funcaptcha-solver")
-UA = ("Mozilla/5.0 (Linux; Android 16; Pixel 10) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/156.0.0.0 Mobile Safari/537.36")
-SESSION_FILE = os.path.join(HERE, "pinterest_cli_session.json")
-RESULTS_FILE = os.path.join(HERE, "pinterest_cli_results.json")
+# Fingerprint MUST match impersonate="chrome131" below. A UA/TLS mismatch is a
+# top-tier bot signal, so do not randomize any of these per request.
+UA = ("Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36")
+SEC_CH_UA = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"'
+# Optional residential egress for cloud hosts (Render): PIN_PROXY=socks5://host:port
+PROXY = os.environ.get("PIN_PROXY") or None
+SESSION_FILE = os.path.join(DATA_DIR, "pinterest_cli_session.json")
+RESULTS_FILE = os.path.join(DATA_DIR, "pinterest_cli_results.json")
 # Default account. Override with --email/--password or PIN_EMAIL/PIN_PASSWORD.
 DEFAULT_EMAIL = "testflowthrowout@gmail.com"
+# Never hard-code the password here (this repo is public). Set PIN_PASSWORD or
+# pass --password. Cookie-only deployments intentionally leave this empty.
 DEFAULT_PASSWORD = ""
 
 sys.path.insert(0, os.path.join(HERE, "BypassV3"))
@@ -137,7 +167,82 @@ def ensure_solver():
     return solver_up()
 
 
+# ------------------------------------------------------------------ cookies
+def parse_cookies(raw):
+    """Parse Netscape cookies.txt, a JSON session, or a HAR export into
+    [{name, value, domain, path}]. No browser / no password required."""
+    found = {}
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = None
+
+    def put(name, value, domain=None, cpath="/"):
+        if not name:
+            return
+        found[name] = {"name": name, "value": value or "",
+                       "domain": domain or ".pinterest.com", "path": cpath or "/"}
+
+    if isinstance(data, dict) and "log" in data:          # HAR
+        for e in data["log"].get("entries", []):
+            for c in (e.get("request", {}).get("cookies") or []):
+                put(c.get("name"), c.get("value"), c.get("domain"))
+            for h in (e.get("response", {}).get("headers") or []):
+                if (h.get("name") or "").lower() == "set-cookie":
+                    pair = (h.get("value") or "").split(";", 1)[0]
+                    if "=" in pair:
+                        n, v = pair.split("=", 1)
+                        put(n.strip(), v.strip())
+    elif isinstance(data, dict) and isinstance(data.get("cookies"), (list, dict)):
+        cs = data["cookies"]
+        if isinstance(cs, dict):
+            for k, v in cs.items():
+                put(k, v)
+        else:
+            for c in cs:
+                put(c.get("name"), c.get("value"), c.get("domain"), c.get("path"))
+    elif isinstance(data, list):                          # JSON cookie list
+        for c in data:
+            put(c.get("name"), c.get("value"), c.get("domain"), c.get("path"))
+    elif isinstance(data, dict):                          # flat {"name": "value"}
+        for k, v in data.items():
+            put(k, v)
+    else:                                                 # Netscape cookies.txt
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            elif line.startswith("#"):
+                continue
+            p = line.split("\t")
+            if len(p) >= 7:
+                put(p[5], p[6], p[0], p[2])
+    return list(found.values())
+
+
+def read_cookie_file(path):
+    return parse_cookies(open(path, "rb").read().decode("utf-8", "ignore"))
+
+
+def cookies_from_env():
+    """PIN_COOKIES_B64 = base64(json) - the cloud-safe way to ship a session."""
+    b64 = os.environ.get("PIN_COOKIES_B64")
+    if not b64:
+        return None
+    try:
+        raw = base64.b64decode(b64).decode("utf-8", "ignore")
+    except Exception:
+        return None
+    return parse_cookies(raw) or None
+
+
 # ------------------------------------------------------------------ client
+class AuthError(Exception):
+    pass
+
+
 IMPERSONATIONS = ["chrome131", "chrome124", "chrome123", "chrome120"]
 
 
@@ -149,9 +254,17 @@ class Pinterest:
 
     # -- session plumbing -------------------------------------------
     def new_session(self):
-        s = requests.Session(impersonate=self.impersonate)
-        s.headers.update({"user-agent": UA,
-                          "accept-language": "en-IN,en-US;q=0.9,en;q=0.8"})
+        opts = {"impersonate": self.impersonate}
+        if PROXY:
+            opts["proxies"] = {"http": PROXY, "https": PROXY}
+        s = requests.Session(**opts)
+        s.headers.update({
+            "user-agent": UA,
+            "accept-language": "en-IN,en-US;q=0.9,en;q=0.8",
+            "sec-ch-ua": SEC_CH_UA,
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": '"Android"',
+        })
         return s
 
     def dump_cookies(self):
@@ -166,18 +279,6 @@ class Pinterest:
                 out.append({"name": k, "value": v,
                             "domain": ".pinterest.com", "path": "/"})
         return out
-
-    def cookie_header(self):
-        """Cookie header string (k=v; k=v) from the current session."""
-        parts = []
-        seen = set()
-        for c in self.dump_cookies():
-            name = c.get("name")
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            parts.append(f"{name}={c.get('value')}")
-        return "; ".join(parts)
 
     def rebuild(self):
         cookies = self.dump_cookies()
@@ -230,9 +331,13 @@ class Pinterest:
             "data": json.dumps({"options": options, "context": {}},
                                separators=(",", ":")),
         })
-        return self.raw("POST", BASE + "/resource/" + path,
-                        headers=self.hdr(source_url, handler),
-                        data=body, timeout=30)
+        r = self.raw("POST", BASE + "/resource/" + path,
+                     headers=self.hdr(source_url, handler),
+                     data=body, timeout=30)
+        if r.status_code in (401, 403):
+            raise AuthError("session expired or not authorized - refresh cookies "
+                            "(do NOT retry the password from a cloud IP)")
+        return r
 
     # -- persistence -------------------------------------------------
     def save(self, email=None):
@@ -243,7 +348,7 @@ class Pinterest:
         print("[*] session saved ->", SESSION_FILE)
 
     def load(self):
-        for path in (SESSION_FILE, os.path.join(HERE, "app_session.json"),
+        for path in (SESSION_FILE, os.path.join(DATA_DIR, "app_session.json"),
                      os.path.join(HERE, "pin_session_requests.json")):
             if not os.path.exists(path):
                 continue
@@ -273,7 +378,30 @@ class Pinterest:
                 print("[*] reused session", os.path.basename(path))
                 return True
         self.session = None
+        self.user = None
         return False
+
+    def import_cookie_list(self, cookies, label="cookies"):
+        if not cookies:
+            raise RuntimeError("no cookies found in " + label)
+        self.session = self.new_session()
+        for c in cookies:
+            try:
+                self.session.cookies.set(c["name"], c["value"],
+                                         domain=c.get("domain") or ".pinterest.com",
+                                         path=c.get("path") or "/")
+            except Exception:
+                pass
+        print(f"[*] imported {len(cookies)} cookies")
+        user = self.whoami()
+        if not user:
+            raise RuntimeError(
+                "those cookies are not a valid logged-in Pinterest session "
+                "(expired, or captured from a logged-out tab)")
+        return user
+
+    def import_cookies(self, path):
+        return self.import_cookie_list(read_cookie_file(path), path)
 
     # -- login -------------------------------------------------------
     def arkose(self):
@@ -352,7 +480,13 @@ class Pinterest:
                 continue
             break
         msg = rr.get("error") if isinstance(rr.get("error"), dict) else {}
-        raise RuntimeError(msg.get("message") or "login rejected")
+        text = msg.get("message") or ""
+        if "reset your password" in text.lower():
+            raise RuntimeError(
+                "Pinterest force-reset this account (risk control). The password and "
+                "all sessions are dead. Reset it via the account email, or authenticate "
+                "with --cookies using a fresh browser session.")
+        raise RuntimeError(text or "login rejected")
 
     # -- data --------------------------------------------------------
     @staticmethod
@@ -472,52 +606,107 @@ def main():
     ap.add_argument("--email", default=os.environ.get("PIN_EMAIL") or DEFAULT_EMAIL)
     ap.add_argument("--password", default=os.environ.get("PIN_PASSWORD") or DEFAULT_PASSWORD)
     ap.add_argument("--fresh", action="store_true", help="force a new login")
+    ap.add_argument("--cookies", default=None,
+                    help="auth from cookies.txt / session.json / HAR (no password)")
+    ap.add_argument("--proxy", default=None,
+                    help="egress proxy, e.g. socks5://host:port (or PIN_PROXY env)")
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--search", dest="extra_search", default=None,
                     help="extra search query to include with 'all'")
+    ap.add_argument("--auto", action="store_true",
+                    help="cookie-first auth with proxy-pool self-heal (see pin_autoauth.py)")
+    ap.add_argument("--pool", default=None,
+                    help="proxy-scraper pool API for --auto (default http://127.0.0.1:8899)")
+    ap.add_argument("--no-heal", action="store_true",
+                    help="with --auto: never log in, only use existing cookies")
     args = ap.parse_args()
+
+    global PROXY
+    if args.proxy:
+        PROXY = args.proxy
+    if args.auto and args.pool:
+        os.environ["PIN_POOL_API"] = args.pool
+    print("[*] egress:", PROXY or "direct")
 
     c = Pinterest()
     results = {}
 
     print("[*] Pinterest CLI — request-only")
     try:
-        if args.fresh or not c.load():
-            print("[*] logging in as", args.email)
-            user = c.login(args.email, args.password)
-            print("[+] logged in:", (user or {}).get("username"))
-        else:
+        cmd = args.command
+        q = " ".join(args.query).strip() if args.query else ""
+
+        if args.auto:
+            import pin_autoauth
+            if args.no_heal:
+                pin_autoauth.heal = lambda *a, **k: (_ for _ in ()).throw(
+                    pin_autoauth.HealBlocked("--no-heal: cookies are required"))
+            c, how = pin_autoauth.ensure_client(
+                email=args.email, password=args.password,
+                cookies_path=args.cookies, fresh=args.fresh)
+            print("[+] auth ready via", how)
             user = c.user or c.whoami()
+        else:
+            env_cookies = None if args.cookies else cookies_from_env()
+
+            if args.cookies:
+                print("[*] importing cookies from", args.cookies)
+                user = c.import_cookies(args.cookies)
+                c.save()
+                print("[+] session valid:", (user or {}).get("username"))
+            elif env_cookies:
+                print("[*] importing cookies from PIN_COOKIES_B64")
+                user = c.import_cookie_list(env_cookies, "PIN_COOKIES_B64")
+                c.save()
+                print("[+] session valid:", (user or {}).get("username"))
+            elif args.fresh or not c.load():
+                print("[*] logging in as", args.email)
+                user = c.login(args.email, args.password)
+                print("[+] logged in:", (user or {}).get("username"))
+            else:
+                user = c.user or c.whoami()
+        results["account"] = user
 
         print("\n== account ==")
         for k in ("username", "full_name", "email", "id", "country", "gender"):
             if user and user.get(k) not in (None, ""):
                 print(f"  {k:10s}: {user[k]}")
-        results["account"] = user
 
-        cmd = args.command
-        q = " ".join(args.query).strip() if args.query else ""
+        def emit():
+            if cmd in ("all", "feed"):
+                pins = c.feed()
+                results["feed"] = pins
+                show_pins("feed", pins, args.limit)
 
-        if cmd in ("all", "feed"):
-            pins = c.feed()
-            results["feed"] = pins
-            show_pins("feed", pins, args.limit)
+            if cmd == "search" or (cmd == "all" and (q or args.extra_search)):
+                sq = q or args.extra_search or ""
+                pins = c.search(sq)
+                results["search"] = {"query": sq, "pins": pins}
+                show_pins(f"search: {sq}", pins, args.limit)
 
-        if cmd == "search" or (cmd == "all" and (q or args.extra_search)):
-            sq = q or args.extra_search or ""
-            pins = c.search(sq)
-            results["search"] = {"query": sq, "pins": pins}
-            show_pins(f"search: {sq}", pins, args.limit)
+            if cmd in ("all", "pins"):
+                pins = c.pins()
+                results["pins"] = pins
+                show_pins("my pins", pins, args.limit)
 
-        if cmd in ("all", "pins"):
-            pins = c.pins()
-            results["pins"] = pins
-            show_pins("my pins", pins, args.limit)
+            if cmd in ("all", "boards"):
+                bs = c.boards()
+                results["boards"] = bs
+                show_boards(bs, args.limit)
 
-        if cmd in ("all", "boards"):
-            bs = c.boards()
-            results["boards"] = bs
-            show_boards(bs, args.limit)
+        try:
+            emit()
+        except AuthError:
+            if not args.auto:
+                raise
+            cls = pin_autoauth.session_state(c)
+            if cls in ("ok", "net"):
+                print("[!] transient auth/network blip (%s); retrying" % cls)
+                emit()
+            else:
+                print("[!] session rejected; healing")
+                pin_autoauth.recover(c, args.email, args.password)
+                emit()
 
         with open(RESULTS_FILE, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2)
