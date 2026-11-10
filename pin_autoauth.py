@@ -329,8 +329,8 @@ def _load_saved(client):
 def ensure_client(email=None, password=None, cookies_path=None, fresh=False,
                   country=None):
     c = pc.Pinterest()
-    email = email or pc.DEFAULT_EMAIL
-    password = password or pc.DEFAULT_PASSWORD
+    email = email or os.environ.get("PIN_EMAIL") or pc.DEFAULT_EMAIL
+    password = password or os.environ.get("PIN_PASSWORD") or pc.DEFAULT_PASSWORD
     if os.environ.get("PIN_STICKY_EGRESS") == "1" and not pc.PROXY:
         last = AuthState().data.get("last_proxy")
         if last:
@@ -364,6 +364,8 @@ def ensure_client(email=None, password=None, cookies_path=None, fresh=False,
 
 
 def recover(client, email=None, password=None, country=None):
-    heal(client, email or pc.DEFAULT_EMAIL, password or pc.DEFAULT_PASSWORD,
+    heal(client,
+         email or os.environ.get("PIN_EMAIL") or pc.DEFAULT_EMAIL,
+         password or os.environ.get("PIN_PASSWORD") or pc.DEFAULT_PASSWORD,
          country=country or os.environ.get("PIN_LOGIN_COUNTRY", "IN"))
     return client
