@@ -65,6 +65,12 @@ def _err(e):
     return jsonify(ok=False, error=str(e)[:300]), 200
 
 
+@app.after_request
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.get("/")
 @app.get("/app")
 def ui():

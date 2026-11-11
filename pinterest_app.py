@@ -781,30 +781,6 @@ async function loadTab(tab, q){
   }catch(e){ toast('Network error'); content.innerHTML=empty('Network error','Could not reach the app.'); }
 }
 
-document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
-  content.innerHTML=loader();
-  let url='/api/feed';
-  if(tab==='search') url='/api/search?q='+encodeURIComponent(LASTQ||'');
-  if(tab==='pins') url='/api/pins';
-  if(tab==='boards') url='/api/boards';
-  try{
-    const r=await fetch(url); const j=await r.json();
-    if(j.auth===false){ showLogin(); return; }
-    if(!j.ok){ toast(j.error||'Request failed'); content.innerHTML=empty('Could not load','Try again in a moment.'); return; }
-    if(tab==='boards'){
-      const bs=j.boards||[]; $('statBoards').textContent=bs.length;
-      content.innerHTML = bs.length? `<div class="grid">${bs.map(boardCard).join('')}</div>` : empty('No boards yet','Boards you create will appear here.');
-    } else {
-      const ps=j.pins||[];
-      if(tab==='pins') $('statPins').textContent=ps.length;
-      if(tab==='search' && !LASTQ){ content.innerHTML=empty('Search Pinterest','Type a query above and press Enter.'); return; }
-      content.innerHTML = ps.length? `<div class="grid">${ps.map(pinCard).join('')}</div>`
-        : empty(tab==='search'?'No results':(tab==='pins'?'No saved pins yet':'Your feed is empty'),'Results come from your own account.');
-    }
-    bindCards();
-  }catch(e){ toast('Network error'); content.innerHTML=empty('Network error','Could not reach the app.'); }
-}
-
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   const tab=t.dataset.tab;
   if(tab==='search'){ $('q').focus(); if(!LASTQ){ loadTab('search'); return; } }
