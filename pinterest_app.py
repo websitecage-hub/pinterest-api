@@ -606,7 +606,7 @@ main{padding:26px;max-width:1600px;margin:0 auto}
 @media(max-width:720px){.grid{columns:2}}
 .pin{break-inside:avoid;margin-bottom:16px;border-radius:14px;overflow:hidden;background:var(--panel);position:relative;cursor:pointer;border:1px solid var(--line);transition:transform .16s,border-color .16s}
 .pin:hover{transform:translateY(-2px);border-color:#3a3a41}
-.pin img{width:100%;display:block;background:#202024;min-height:60px}
+.pin img,.pin video{width:100%;display:block;background:#202024;min-height:60px}
 .pin .ov{position:absolute;inset:auto 0 0 0;padding:26px 14px 12px;background:linear-gradient(transparent,rgba(0,0,0,.86));opacity:0;transition:.16s}
 .pin:hover .ov{opacity:1}
 .pin .ov h3{font-size:13px;margin:0 0 3px;line-height:1.3;font-weight:600}
@@ -661,6 +661,7 @@ main{padding:26px;max-width:1600px;margin:0 auto}
   <div class="tabs">
     <button class="tab active" data-tab="feed">Home feed</button>
     <button class="tab" data-tab="search">Search</button>
+    <button class="tab" data-tab="videos">Videos</button>
     <button class="tab" data-tab="pins">My pins</button>
     <button class="tab" data-tab="boards">Boards</button>
   </div>
@@ -693,7 +694,9 @@ function showApp(u){
 }
 
 function pinCard(p){
-  const img=p.image?`<img loading="lazy" src="${esc(p.image)}" alt="">`:'<div style="height:180px"></div>';
+  const img=p.video_url
+    ? `<video src="${esc(p.video_url)}" poster="${esc(p.image||'')}" autoplay muted loop playsinline preload="metadata"></video>`
+    : (p.image?`<img loading="lazy" src="${esc(p.image)}" alt="">`:'<div style="height:180px"></div>');
   const tag=p.is_video?'<span class="tag">Video</span>':'';
   return `<article class="pin" data-url="${esc(p.pin_url||p.link)}">
     ${img}${tag}
@@ -736,7 +739,7 @@ async function loadMore(){
   if(more) more.innerHTML='<span class="spin" style="border-color:rgba(255,255,255,.2);border-top-color:#e60023"></span> Loading more…';
   const old=NEXT;
   let url='/api/feed?bookmark='+encodeURIComponent(NEXT);
-  if(TAB==='search') url='/api/search?q='+encodeURIComponent(LASTQ||'')+'&bookmark='+encodeURIComponent(NEXT);
+  if(TAB==='search'||TAB==='videos') url='/api/search?q='+encodeURIComponent(LASTQ||'')+(TAB==='videos'?'&scope=videos':'')+'&bookmark='+encodeURIComponent(NEXT);
   try{
     const j=await (await fetch(url)).json();
     if(!j.ok){ toast(j.error||'Request failed'); NEXT=null; }
@@ -759,7 +762,7 @@ async function loadTab(tab, q){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
   content.innerHTML=loader();
   let url='/api/feed';
-  if(tab==='search') url='/api/search?q='+encodeURIComponent(LASTQ||'');
+  if(tab==='search'||tab==='videos') url='/api/search?q='+encodeURIComponent(LASTQ||'')+(tab==='videos'?'&scope=videos':'');
   if(tab==='pins') url='/api/pins';
   if(tab==='boards') url='/api/boards';
   try{
@@ -771,11 +774,11 @@ async function loadTab(tab, q){
       content.innerHTML = bs.length? `<div class="grid">${bs.map(boardCard).join('')}</div>` : empty('No boards yet','Boards you create will appear here.');
     } else {
       const ps=j.pins||[];
-      if(tab==='search' && !LASTQ){ content.innerHTML=empty('Search Pinterest','Type a query above and press Enter.'); return; }
+      if((tab==='search'||tab==='videos') && !LASTQ){ content.innerHTML=empty('Search Pinterest','Type a query above and press Enter.'); return; }
       if(tab==='pins') $('statPins').textContent=ps.length;
       if(!ps.length){ content.innerHTML=empty(tab==='search'?'No results':(tab==='pins'?'No saved pins yet':'Your feed is empty'),'Results come from your own account.'); return; }
       addPins(ps, false);
-      NEXT=(tab==='feed'||tab==='search')?(j.bookmark||null):null;
+      NEXT=(tab==='feed'||tab==='search'||tab==='videos')?(j.bookmark||null):null;
       updateMore(SEEN.size);
     }
   }catch(e){ toast('Network error'); content.innerHTML=empty('Network error','Could not reach the app.'); }
@@ -783,10 +786,10 @@ async function loadTab(tab, q){
 
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   const tab=t.dataset.tab;
-  if(tab==='search'){ $('q').focus(); if(!LASTQ){ loadTab('search'); return; } }
+  if(tab==='search'||tab==='videos'){ $('q').focus(); if(!LASTQ){ loadTab(tab); return; } }
   loadTab(tab);
 }));
-$('q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ loadTab('search', $('q').value.trim()); }});
+$('q').addEventListener('keydown',e=>{ if(e.key==='Enter'){ loadTab(TAB==='videos'?'videos':'search', $('q').value.trim()); }});
 
 $('logoutBtn').addEventListener('click', async ()=>{
   await fetch('/api/logout',{method:'POST'}); USER=null; showLogin();

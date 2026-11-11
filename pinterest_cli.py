@@ -502,6 +502,27 @@ class Pinterest:
                 return v["url"]
         return None
 
+    @staticmethod
+    def video_url(p):
+        vids = p.get("videos") or {}
+        vl = vids.get("video_list") if isinstance(vids, dict) else None
+        if isinstance(vl, dict):
+            for k in ("V_720P", "V_480P", "V_240P", "V_HLSV4", "V_HLSV3"):
+                v = vl.get(k)
+                if isinstance(v, dict) and v.get("url"):
+                    return v["url"]
+        spd = p.get("story_pin_data") or {}
+        for page in (spd.get("pages") or []):
+            for block in (page.get("blocks") or []):
+                v = block.get("video") or {}
+                vl = v.get("video_list") if isinstance(v, dict) else None
+                if isinstance(vl, dict):
+                    for k in ("V_720P", "V_480P", "V_240P", "V_HLSV4"):
+                        x = vl.get(k)
+                        if isinstance(x, dict) and x.get("url"):
+                            return x["url"]
+        return None
+
     def norm_pin(self, it):
         p = it
         if not p.get("images"):
@@ -516,6 +537,7 @@ class Pinterest:
                 "domain": p.get("domain") or "",
                 "pin_url": f"https://www.pinterest.com/pin/{pid}/" if pid else "",
                 "is_video": bool(p.get("is_video")),
+                "video_url": self.video_url(p),
                 "board": board.get("name") if isinstance(board, dict) else ""}
 
     def whoami(self):
@@ -548,8 +570,8 @@ class Pinterest:
     def feed(self):
         return self.feed_page()[0]
 
-    def search_page(self, q, bookmark=None, page_size=25):
-        opts = {"query": q, "scope": "pins", "page_size": page_size}
+    def search_page(self, q, bookmark=None, page_size=25, scope="pins"):
+        opts = {"query": q, "scope": scope or "pins", "page_size": page_size}
         if bookmark:
             opts["bookmark"] = bookmark
         r = self.resource("BaseSearchResource/get/", opts,

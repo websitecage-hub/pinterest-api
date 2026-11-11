@@ -119,9 +119,12 @@ def api_search():
     if not q:
         return jsonify(ok=False, error="q required"), 400
     bookmark = request.args.get("bookmark") or None
+    scope = (request.args.get("scope") or "pins").strip().lower()
+    if scope not in ("pins", "videos", "products", "articles"):
+        scope = "pins"
     try:
-        pins, nxt = with_heal(lambda c: c.search_page(q, bookmark))
-        return jsonify(ok=True, query=q, pins=pins, bookmark=nxt)
+        pins, nxt = with_heal(lambda c: c.search_page(q, bookmark, scope=scope))
+        return jsonify(ok=True, query=q, scope=scope, pins=pins, bookmark=nxt)
     except Exception as e:
         return _err(e)
 
