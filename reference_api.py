@@ -96,8 +96,10 @@ def api_feed():
     g = _guard()
     if g:
         return g
+    bookmark = request.args.get("bookmark") or None
     try:
-        return jsonify(ok=True, pins=with_heal(lambda c: c.feed()))
+        pins, nxt = with_heal(lambda c: c.feed_page(bookmark))
+        return jsonify(ok=True, pins=pins, bookmark=nxt)
     except Exception as e:
         return _err(e)
 
@@ -110,8 +112,10 @@ def api_search():
     q = (request.args.get("q") or "").strip()
     if not q:
         return jsonify(ok=False, error="q required"), 400
+    bookmark = request.args.get("bookmark") or None
     try:
-        return jsonify(ok=True, query=q, pins=with_heal(lambda c: c.search(q)))
+        pins, nxt = with_heal(lambda c: c.search_page(q, bookmark))
+        return jsonify(ok=True, query=q, pins=pins, bookmark=nxt)
     except Exception as e:
         return _err(e)
 

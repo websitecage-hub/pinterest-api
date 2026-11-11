@@ -534,18 +534,33 @@ class Pinterest:
         except Exception:
             return None
 
+    def feed_page(self, bookmark=None, page_size=25):
+        opts = {"field_set_key": "mobile_grid_item",
+                "first_page_size": 25, "page_size": page_size}
+        if bookmark:
+            opts["bookmark"] = bookmark
+        r = self.resource("UserHomefeedResource/get/", opts, "/")
+        rr = r.json()["resource_response"]
+        items = rr.get("data") or []
+        pins = [self.norm_pin(x) for x in items if x.get("type") == "pin"][:40]
+        return pins, rr.get("bookmark")
+
     def feed(self):
-        r = self.resource("UserHomefeedResource/get/",
-                          {"field_set_key": "mobile_grid_item",
-                           "first_page_size": 25, "page_size": 15}, "/")
-        items = r.json()["resource_response"].get("data") or []
-        return [self.norm_pin(x) for x in items if x.get("type") == "pin"][:40]
+        return self.feed_page()[0]
+
+    def search_page(self, q, bookmark=None, page_size=25):
+        opts = {"query": q, "scope": "pins", "page_size": page_size}
+        if bookmark:
+            opts["bookmark"] = bookmark
+        r = self.resource("BaseSearchResource/get/", opts,
+                          f"/search/pins/?q={urllib.parse.quote(q)}")
+        rr = r.json()["resource_response"]
+        res = rr.get("data", {}).get("results") or []
+        pins = [self.norm_pin(x) for x in res if x.get("type") == "pin"][:40]
+        return pins, rr.get("bookmark")
 
     def search(self, q):
-        r = self.resource("BaseSearchResource/get/", {"query": q, "scope": "pins"},
-                          f"/search/pins/?q={urllib.parse.quote(q)}")
-        res = r.json()["resource_response"].get("data", {}).get("results") or []
-        return [self.norm_pin(x) for x in res if x.get("type") == "pin"][:40]
+        return self.search_page(q)[0]
 
     def pins(self):
         fields = ("pin.id,pin.images[236x,474x,orig],pin.grid_title,pin.title,"

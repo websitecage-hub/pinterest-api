@@ -706,15 +706,82 @@ function boardCard(b){
     <div class="b"><h3>${esc(b.name||'Board')}</h3><span>${b.pin_count||0} pins</span></div>
   </article>`;
 }
-function bindCards(){
-  content.querySelectorAll('.pin,.board').forEach(el=>el.addEventListener('click',()=>{
-    const u=el.dataset.url; if(u) window.open(u,'_blank','noopener');
-  }));
+let NEXT=null, LOADING=false, SEEN=new Set();
+
+content.addEventListener('click', e=>{
+  const el=e.target.closest('.pin,.board'); if(!el) return;
+  const u=el.dataset.url; if(u) window.open(u,'_blank','noopener');
+});
+
+function addPins(ps, append){
+  const fresh=[];
+  (ps||[]).forEach(p=>{ const k=String(p.id||p.pin_url||p.image||''); if(k && !SEEN.has(k)){ SEEN.add(k); fresh.push(p); }});
+  if(!append) content.innerHTML='<div class="grid"></div>';
+  const grid=content.querySelector('.grid');
+  if(grid) grid.insertAdjacentHTML('beforeend', fresh.map(pinCard).join(''));
+  return fresh.length;
 }
 
+function updateMore(total){
+  let more=document.getElementById('more');
+  if(!more){ more=document.createElement('div'); more.id='more'; more.className='loader'; content.appendChild(more); }
+  if(NEXT){ more.style.display='block'; more.innerHTML='<span class="spin" style="border-color:rgba(255,255,255,.2);border-top-color:#e60023"></span> Scroll for more…'; }
+  else { more.style.display=total?'block':'none'; more.innerHTML=total?`That\u2019s all \u2014 ${total} pins.`:''; }
+}
+
+async function loadMore(){
+  if(LOADING || !NEXT) return;
+  LOADING=true;
+  const more=document.getElementById('more');
+  if(more) more.innerHTML='<span class="spin" style="border-color:rgba(255,255,255,.2);border-top-color:#e60023"></span> Loading more…';
+  const old=NEXT;
+  let url='/api/feed?bookmark='+encodeURIComponent(NEXT);
+  if(TAB==='search') url='/api/search?q='+encodeURIComponent(LASTQ||'')+'&bookmark='+encodeURIComponent(NEXT);
+  try{
+    const j=await (await fetch(url)).json();
+    if(!j.ok){ toast(j.error||'Request failed'); NEXT=null; }
+    else{
+      const n=addPins(j.pins||[], true);
+      NEXT=(j.bookmark && j.bookmark!==old && n>0)?j.bookmark:null;
+      updateMore(SEEN.size);
+    }
+  }catch(e){ toast('Network error'); }
+  LOADING=false;
+}
+
+window.addEventListener('scroll', ()=>{
+  if(!NEXT || LOADING) return;
+  if(window.innerHeight+window.scrollY >= document.documentElement.scrollHeight-900) loadMore();
+}, {passive:true});
+
 async function loadTab(tab, q){
-  TAB=tab; LASTQ=q||LASTQ;
+  TAB=tab; LASTQ=q||LASTQ; NEXT=null; LOADING=false; SEEN=new Set();
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+  content.innerHTML=loader();
+  let url='/api/feed';
+  if(tab==='search') url='/api/search?q='+encodeURIComponent(LASTQ||'');
+  if(tab==='pins') url='/api/pins';
+  if(tab==='boards') url='/api/boards';
+  try{
+    const r=await fetch(url); const j=await r.json();
+    if(j.auth===false){ showLogin(); return; }
+    if(!j.ok){ toast(j.error||'Request failed'); content.innerHTML=empty('Could not load','Try again in a moment.'); return; }
+    if(tab==='boards'){
+      const bs=j.boards||[]; $('statBoards').textContent=bs.length;
+      content.innerHTML = bs.length? `<div class="grid">${bs.map(boardCard).join('')}</div>` : empty('No boards yet','Boards you create will appear here.');
+    } else {
+      const ps=j.pins||[];
+      if(tab==='search' && !LASTQ){ content.innerHTML=empty('Search Pinterest','Type a query above and press Enter.'); return; }
+      if(tab==='pins') $('statPins').textContent=ps.length;
+      if(!ps.length){ content.innerHTML=empty(tab==='search'?'No results':(tab==='pins'?'No saved pins yet':'Your feed is empty'),'Results come from your own account.'); return; }
+      addPins(ps, false);
+      NEXT=(tab==='feed'||tab==='search')?(j.bookmark||null):null;
+      updateMore(SEEN.size);
+    }
+  }catch(e){ toast('Network error'); content.innerHTML=empty('Network error','Could not reach the app.'); }
+}
+
+document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
   content.innerHTML=loader();
   let url='/api/feed';
   if(tab==='search') url='/api/search?q='+encodeURIComponent(LASTQ||'');
